@@ -282,7 +282,7 @@ PE `Time/Date` 显示 1970-01-01）。
    - `..\probe_press_keys.py`（dry-run dll）：**36 个用例 ALL PASS** —— 12 个组合键 + 18 个裸命名键
      的事件串逐字节核对（`ctrl+shift+left` → `1Ds,2As,4Bsx,4Bsx-up,2As-up,1Ds-up`、`home` → `47sx`、
      `numpad5` → `4Cs`、`escape` → `01s`），6 个非法 spec 仍返回 `0`
-   - `..\smoke_backspace.py`：**182 项断言仍全部 PASS**（场景 F 只数 `_dry_run_sent`、场景 H 用桩
+   - `tests\smoke_backspace.py`：**182 项断言仍全部 PASS**（场景 F 只数 `_dry_run_sent`、场景 H 用桩
      `press_keys` / `open_url` 断言 spec 字符串与 URL，所以事件串格式变化不影响它们）
    - `..\probe_scan_e2e.py`：**正式 dll**（用 rime.dll 自带的 Lua 载入）向自建测试窗口真注入：
 
@@ -312,7 +312,7 @@ PE `Time/Date` 显示 1970-01-01）。
 
 7. **v8（`-` 分步 + `@search`）的验证**：
 
-   - `..\smoke_backspace.py`：**182 项断言 ALL PASS**（v6 的 136 项、v8 的 174 项全部保留并通过，另加 8 项：
+   - `tests\smoke_backspace.py`：**182 项断言 ALL PASS**（v6 的 136 项、v8 的 174 项全部保留并通过，另加 8 项：
      26 个默认触发码逐个核对 spec、`f;` 的 URL 与两种失败日志、`-` 归一化、`revert/search_url`
      换成必应、没上屏就按 `f;` 不发请求）
    - `..\probe_prod_dll.py`（正式 dll）：`press_keys` / `press_backspace` / `open_url` 都是 function、
@@ -324,7 +324,7 @@ PE `Time/Date` 显示 1970-01-01）。
      真的把默认浏览器拉起来了**（测试时弹过一次浏览器标签页，事后已关掉服务）
 
 **未做（重要）**：没有启动小狼毫、没有在 Weasel 里输入过 `qq/`；v7/v8 的"真注入"只发生在本目录
-那几个探针**自己创建的测试窗口**里（`tests\probe_scan_e2e.py` / `tests\probe_inject_variants.py`，注入前会把
+那几个探针**自己创建的测试窗口**里（`tests\probe_scan_e2e.py` / `probe_inject_variants.py`，注入前会把
 自己的窗口抢到前台，读完选区就关掉），**没有往你的任何窗口发过按键**；`open_url` 的真实验证
 也只开了 `127.0.0.1` 上的测试页。真正的删除手感、`ss;`/`ww;`/`f;` 在你常用编辑器里的表现，
 仍必须由你部署后实测。
