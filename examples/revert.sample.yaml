@@ -28,16 +28,23 @@ patch:
   #"revert/hotkey": "Control+slash"
 
   # ---------- 5. 方式三：快捷触发码（默认关闭）----------
-  # 启用脚本里预置的 17 项（zz; yy; aa; cc; vv; xx; ss; gg; tt; ww; bb; rr; hh; ee; dd; kk; ff;）
+  # 启用脚本里预置的 26 项：
+  #   z; y; a; c; v; s; x; g; t; w; b; r; h; e; d; kk; aa; dd; ww; hh; tt; gg; xx; ss; ff; f;
   "revert/shortcuts": "@defaults"
   # 只要其中几项（不写 @defaults 就是"只有这几项"）：
-  #"revert/shortcuts": "zz;=ctrl+z  yy;=ctrl+y  ss;=shift+home  ff;=@to-symbol"
-  # 预置项 + 自己加的项（混写）：
+  #"revert/shortcuts": "z;=ctrl+z  y;=ctrl+y  ss;=shift+home  ff;=@to-symbol  f;=@search"
+  # 预置项 + 自己加的项（混写；注意别和默认的 26 个撞码，撞了那几项都不生效）：
   #"revert/shortcuts": "@defaults eq;=ctrl+end  wq;=ctrl+shift+right"
-  # 多步动作：先选到行首，再往前多选一格（连换行一起选）
-  #"revert/shortcuts": "sq;=shift+home,shift+left"
+  # 多步动作：`-` 和 `,` 等价（一步发完、全部松开，隔 30ms 再发下一步）
+  #"revert/shortcuts": "sq;=shift+home-shift+left  hh;=shift+home-ctrl+c"
 
-  # ---------- 6. @to-symbol 认定的"符号" ----------
+  # ---------- 6. @search 用的搜索引擎（f; 就是它）----------
+  # 模板里的 %s 会被替换成"最后一次上屏"的原文（已做 percent-encode）；没有 %s 时直接接在末尾。
+  "revert/search_url": "https://www.baidu.com/s?wd=%s"
+  #"revert/search_url": "https://www.bing.com/search?q=%s"
+  #"revert/search_url": "https://www.google.com/search?q=%s"
+
+  # ---------- 7. @to-symbol 认定的"符号" ----------
   # 默认值（英文逗号/句号等也算了进去）：
   "revert/symbols": "，。！？；：、,.!?;:"
   # 只认中文标点：
@@ -45,7 +52,7 @@ patch:
   # 想要"删到本行行首但不删前面的换行"，把换行符 \n 也算进符号集：
   #"revert/symbols": "，。！？；：、\n"
 
-  # ---------- 7. 记账与保护 ----------
+  # ---------- 8. 记账与保护 ----------
   "revert/stack_size": 50                   # 能连续撤回多少笔
   "revert/max_backspaces": 500              # 单次最多删多少字符（不要超过 10000）
   "revert/debounce_ms": 200                 # 连按保护（毫秒），只对方式一（文本触发码）生效

@@ -36,8 +36,8 @@
 `revert/shortcuts` 里写 `触发码=动作`（空格分隔），命中就吞掉触发码、让 dll 发一串真按键；
 动作可以是按键序列（`ctrl+z`、多步 `shift+home,shift+left`）、`@to-symbol`（删到前一个符号、
 符号留在屏幕上）、`@to-symbol-include`（连符号一起删）、`@delete`（等于 `qq/`）。
-默认全不启用（脚本里预置 17 项，写 `"@defaults"` 一次启用）。因此这一版：
-- **要换新 dll**（v6 是 33457 B；v7 起是 34203 B）：C 侧新增 `press_keys(spec)`，返回 1 已排队 / 2 被忽略 / 0 参数非法；
+默认全不启用（脚本里预置 26 项，写 `"@defaults"` 一次启用；v6 时是 14 项、v6.1 是 17 项）。因此这一版：
+- **要换新 dll**（v6 是 33457 B；v7 是 34203 B；v8 是 36190 B）：C 侧新增 `press_keys(spec)`，返回 1 已排队 / 2 被忽略 / 0 参数非法；
   `press_backspace` 没动，所以不用快捷键的话旧 dll 也能跑（只是日志会写 `press_keys is unavailable`）
 - 记账栈从"只记字数"改成"记字数 + 上屏原文"，`@to-symbol` 靠原文往回找符号
 - 三种触发方式互不排斥；快捷键分支不受 `debounce` 限制，但共用 C 侧那个 150 ms 注入窗口
@@ -54,13 +54,28 @@
 - `revert.lua`（28721 B）**不用换**，配置和系统设置也一个字都不用改 —— 只替换 dll 即可
 - dry-run 事件串的写法变了（带扫描码的写成 `"2Cs"`、扩展键 `"47sx"`），只影响自测断言
 
-- 触发方式：默认文本触发码 `qq/`（默认值在 `revert.lua:58` 的 `DEFAULTS.trigger`，可用 `revert/trigger` 覆盖，
+**v8 的关键改动：`-` 分步写法 + `f;` 用浏览器搜索最后一次上屏 + 默认表换成 26 项。**
+
+- 动作里 `-` 与 `,` **完全等价**：`shift+home-ctrl+c` 和 `shift+home,ctrl+c` 发的是同一串
+  （Lua 侧在 `revert.lua:340` 附近把 `-` 归一化成 `,`，C 侧一行没动）。所谓"放下再按下一步"
+  本来就是 C 侧多步的行为：每步内部是"修饰键按下 → 键按下 → 键抬起 → 修饰键逆序抬起"，
+  步与步之间等 `STEP_GAP_MS 30` 毫秒
+- **要换新 dll**（36190 B）：C 侧新增 `open_url(url)`（`ShellExecuteW`，后台线程里调用，
+  不会闪黑框），返回值同 `press_keys`：1 已排队 / 2 被忽略 / 0 参数非法。只放行 `http://`、`https://`，
+  拒绝空白字符与 `"` `<` `>` `|`；链接用 `-lshell32` 链进来
+- 新增 `@search` 动作 + 配置项 `revert/search_url`（默认 `https://www.baidu.com/s?wd=%s`）：
+  取**最后一次上屏的原文**，UTF-8 百分号编码后替换 `%s`（没有 `%s` 就接在末尾），再交给 `open_url`
+- `DEFAULT_SHORTCUTS` 从 17 项换成用户指定的 26 项（`z;`…`f;`），仍然默认一个都不启用
+- **v8 要换两个文件**：`sendKeyCode.dll`（36190 B）+ `revert.lua`（32444 B）；配置里再加
+  `"revert/shortcuts": "@defaults"` 才会启用这 26 项
+
+- 触发方式：默认文本触发码 `qq/`（默认值在 `revert.lua:61` 的 `DEFAULTS`，`trigger` 在 `:62`，可用 `revert/trigger` 覆盖，
   写 `none`/`off`/`-` 即关闭）；可选组合键 `revert/hotkey`（默认空 = 不启用，填了与文本触发码**同时生效**）
 - 行为：触发后向当前窗口注入 N 次退格（`VK_BACK`），N = 上一次上屏的字符数（单次上限
   `revert/max_backspaces`，默认 500）
-- 参数全部可配（默认在 `revert.lua:57` 的 `DEFAULTS`，可用方案 / `custom.yaml` 覆盖，不用重编）：
-  `revert/trigger`、`revert/hotkey`、`revert/shortcuts`、`revert/symbols`、`revert/dll_dir`、
-  `revert/stack_size`、`revert/max_backspaces`、`revert/debounce_ms`
+- 参数全部可配（默认在 `revert.lua:61` 的 `DEFAULTS`，可用方案 / `custom.yaml` 覆盖，不用重编）：
+  `revert/trigger`、`revert/hotkey`、`revert/shortcuts`、`revert/search_url`、`revert/symbols`、
+  `revert/dll_dir`、`revert/stack_size`、`revert/max_backspaces`、`revert/debounce_ms`
 - 模块内部名必须是 `sendKeyCode.dll`，入口 `luaopen_sendKeyCode`
 
 ---
@@ -69,14 +84,14 @@
 
 | 文件 | 大小 | 说明 |
 | --- | --- | --- |
-| `sendKeyCode.dll` | 34203 B | 模块本体，x64。sha256 `50d2fea8dfc3abb4d9af512e00a278cf215e63c4b7714472bc982a7e64c69359` |
-| `sendKeyCode.c` | 20384 B | 编译用的 C 源（= 你那份 + 函数替换 + 异步注入 + v6 的 `press_keys` + v7 的扫描码注入，diff 见第 2 节）。sha256 `aa60524d8699c0b31dfe23465507c4a8e3c1f91164390ed5185e072a79f56db8` |
-| `revert.lua` | 28721 B | 配套 Lua **processor** 组件（`commit_notifier` 记账 + **三种触发方式可同时启用** + 快捷键动作表 + 删到前一个符号 + 可配置参数 + 被忽略时回填记录）。sha256 `50275a07f0df2ff8e4ff5fe0354b49d78adcae77c212cada009d62902e64d925` |
-| `build.cmd` | 1672 B | 一键构建（ASCII + CRLF） |
+| `sendKeyCode.dll` | 36190 B | 模块本体，x64。sha256 `889f98a4955c44dda53f1b6fefcec66acf2747c7301de298eabaf3bc4a7dd89f` |
+| `sendKeyCode.c` | 24275 B | 编译用的 C 源（= 你那份 + 函数替换 + 异步注入 + v6 的 `press_keys` + v7 的扫描码注入 + v8 的 `open_url`，diff 见第 2 节）。sha256 `58724062647c0fd84b5f1c8888229c53ddceeb6bc2f67f6bc31aeb84df4a6452` |
+| `revert.lua` | 32444 B | 配套 Lua **processor** 组件（`commit_notifier` 记账 + **三种触发方式可同时启用** + 26 项快捷键动作表 + `-`/`,` 多步 + 删到前一个符号 + `@search` 浏览器搜索 + 可配置参数 + 被忽略时回填记录）。sha256 `dc910107ee670c1f9ca064dd7b75df0a5ae4da21d538a5d50442af6879f901e2` |
+| `build.cmd` | 1682 B | 一键构建（ASCII + CRLF，已加 `-lshell32`）。sha256 `26118ccf00e6ddb57770577d7a51620177e83ae3c2543b27692ef54577970c80` |
 | `include\lua.h` / `luaconf.h` / `lauxlib.h` | 16282 / 22044 / 9122 B | Lua 5.4.0 头文件，ABI 基准 |
 | `lib\rime-lua.def` + `lib\librime-lua.a` | 91 / 4672 B | 备选导入库（不想直接链 rime.dll 时用） |
 
-上游原始 `sendKeyCode.c` **未改动**
+你原始的 `上游原始 sendKeyCode.c` **未改动**
 （1139 B，sha256 `EF885BA3A26D3DA08A7FE76071337F9FDA84BB79EE4C0A05CA16D36B018033C9`）。
 上一版 Ctrl+Z 的交付仍在 `（早期 Ctrl+Z 版本，未包含在本仓库）`，未被覆盖。
 
@@ -120,6 +135,14 @@
   非扩展键的例子：`z`→`2Cs`、`ctrl`→`1Ds`、`shift`→`2As`、`backspace`→`0Es`、`slash`→`35s`。
 - **退格那条路（`inject_backspaces()`）刻意不动**：它一直工作正常（只填 `wVk` 的退格不受影响），
   不冒回归风险。所以同一份 dll 里两种写法并存：组合键走扫描码，退格走老写法。
+- **v8 新增 `open_url(url)`**（走同一套异步槽位：`g_pending_kind` 多了 `3 = 打开网址`）：
+  - `static void open_url_now(const char *url)`：dry-run 下只记录次数与文本；正式版
+    `MultiByteToWideChar(CP_UTF8, …)` 转宽字符后 `ShellExecuteW(NULL, L"open", wide, NULL, NULL, SW_SHOWNORMAL)`
+  - `static BOOL url_is_valid(const char *url)`：只放行 `http://` / `https://`，拒绝 `<=0x20`、`0x7F`、
+    `"`、`<`、`>`、`|`（不给自己留"拼错就打开奇怪协议"的口子）
+  - `l_open_url`：`luaL_checklstring` → 长度 1..`MAX_URL_LEN`(2048) → 校验 → `claim_slot()` 失败返 2 →
+    `ensure_worker()` 失败就当场同步打开 → 否则填 `g_pending_url` + `InterlockedExchange(&g_pending_kind, 3)` 返 1
+  - dry-run 侧新增 `_dry_run_url_opens()` / `_dry_run_url()`，`_dry_run_reset()` 一并清零
 
 ---
 
@@ -127,13 +150,14 @@
 
 **头文件**：`lua.h` + `luaconf.h` + `lauxlib.h`（Lua 5.4.0，`LUA_VERSION_NUM 504`）。
 本机 MSYS2 没装 Lua 包，也不存在 `C:\msys64\mingw64\include\lua.h`；这套头文件取自
-`上游 rime-lua-sendKeyCode 的 lua\`（随项目附带的 Lua 5.4.0 原树），已放进 `include\`，编译自足。
+`上游 Lua 5.4.0 源码树的 lua\ 目录`（随项目附带的 Lua 5.4.0 原树），已放进 `include\`，编译自足。
 
 **链接库**：必须解析 5 个 Lua 符号 → 由 **rime.dll** 提供（rime.dll 内嵌 Lua 5.4，725 个具名导出
 里含 154 个 `lua*`/`luaL*`）。实测去掉 `-L… -lrime` 会报
 `undefined reference to 'luaL_optinteger'` / `'lua_pushinteger'` / `'lua_createtable'` 等，
 所以**这些符号必须来自 rime.dll 或由它生成的导入库**（本机没有独立 Lua 运行库可用）。
-系统库只需 `-luser32`（`SendInput`）；msvcrt / KERNEL32 由 MinGW 运行时自动带上。
+系统库只需 `-luser32`（`SendInput`、`MapVirtualKeyW`）和 `-lshell32`（`ShellExecuteW`）；
+msvcrt / KERNEL32 由 MinGW 运行时自动带上。
 
 **工具链**：MSYS2 MinGW-w64 x64 `gcc 16.2.0` + `binutils 2.47-4`（ld / as / objdump / dlltool）。
 不用 make，不编译其它 C 文件。
@@ -150,7 +174,7 @@
 set "PATH=C:\msys64\mingw64\bin;%PATH%"
 cd /d <本目录>
 gcc -shared -fPIC -o sendKeyCode.dll sendKeyCode.c -Iinclude ^
-    -L"C:\Program Files\Rime\weasel-0.17.4" -luser32 -lrime -O2 -Wl,--no-insert-timestamp
+    -L"C:\Program Files\Rime\weasel-0.17.4" -luser32 -lshell32 -lrime -O2 -Wl,--no-insert-timestamp
 ```
 
 备选（不把 rime.dll 直接交给链接器，改用由它的导出生成的导入库）：
@@ -158,7 +182,7 @@ gcc -shared -fPIC -o sendKeyCode.dll sendKeyCode.c -Iinclude ^
 ```bat
 dlltool -d lib\rime-lua.def -l lib\librime-lua.a -D rime.dll
 gcc -shared -fPIC -o sendKeyCode.dll sendKeyCode.c -Iinclude lib\librime-lua.a ^
-    -luser32 -O2 -Wl,--no-insert-timestamp
+    -luser32 -lshell32 -O2 -Wl,--no-insert-timestamp
 ```
 
 **可重复性**：连续两次构建逐字节一致（`--no-insert-timestamp` 抹掉时间戳，
@@ -171,8 +195,9 @@ PE `Time/Date` 显示 1970-01-01）。
 - 架构：`pei-x86-64`（x86-64）
 - 导出表：仅 `luaopen_sendKeyCode`（Number in Export Address Table = 1）
 - 导入表：
-  - `rime.dll`：`luaL_checkversion_`、`luaL_optinteger`、`luaL_setfuncs`、`lua_createtable`、`lua_pushinteger`
-  - `USER32.dll`：`SendInput`
+  - `rime.dll`：`luaL_checkversion_`、`luaL_checklstring`、`luaL_optinteger`、`luaL_setfuncs`、`lua_createtable`、`lua_pushinteger`
+  - `USER32.dll`：`MapVirtualKeyW`（v7 起）、`SendInput`
+  - `SHELL32.dll`：`ShellExecuteW`（v8 起，`@search` 用）
   - `KERNEL32.dll`：`CloseHandle`、`CreateThread`、`GetLastError`、`GetTickCount64`、`Sleep`、`VirtualProtect`、`VirtualQuery`
   - `msvcrt.dll`：`__iob_func`、`_initterm`、`_lock`、`_unlock`、`abort`、`calloc`、`fprintf`、`free`、`memcpy`、`realloc`、`vfprintf`
 - 无 `libgcc*` / `libwinpthread*` 依赖（拷到别的机器不会缺 DLL）
@@ -220,26 +245,29 @@ PE `Time/Date` 显示 1970-01-01）。
    | 组合键写成 `Ctrl+/` | 同样识别 | ✅ |
    | 配置非法值（-3 / 999999 / -1） | 夹到 `LIMITS`：1 / 10000 / 0 | ✅ |
    | 配置错的 `dll_dir` | 记 `module=MISSING`，触发不动作 | ✅ |
-   | 配置 `revert/shortcuts="@defaults pq;=@delete"`（v6） | 默认 17 项 + `pq;` 共 18 项生效；`zz;`→`ctrl+z`、`yy;`→`ctrl+y`、`aa;`→`ctrl+a`、`cc;`→`ctrl+c`、`vv;`→`ctrl+v`、`xx;`→`ctrl+x`、`ss;`→`shift+home`、`gg;`→`end`、`tt;`→`home`、`ww;`→`ctrl+shift+left`、`bb;`→`ctrl+backspace`、`rr;`→`ctrl+delete`、`hh;`→`ctrl+home`、`ee;`→`ctrl+end`、`dd;`→`ctrl+shift+backspace`、`kk;`→`ctrl+shift+k`；每项都是"前两键 kNoop、末键 kAccepted" | ✅ |
-   | 前缀不对（`qz;`）/ 末键不对（`zz,`）/ 只打一半（`zz`）/ 带 Ctrl 的 `;` | 全程 kNoop，什么都不发 | ✅ |
-   | `@defaults` 与 `@defaults xy;=ctrl+shift+right` | 分别生效 17 项 / 18 项，`revert.default_shortcuts` 表里有 17 项 | ✅ |
-   | `pp;=@to-symbol-include`、`sm;=shift+home,shift+left` | 多步序列按原样交给 `press_keys` | ✅ |
+   | 配置 `revert/shortcuts="@defaults pq;=@delete"`（v8 的 26 项表） | 默认 26 项 + `pq;` 共 27 项生效；`z;`→`ctrl+z`、`y;`→`ctrl+y`、`a;`→`ctrl+a`、`c;`→`ctrl+c`、`v;`→`ctrl+v`、`s;`→`up`、`x;`→`down`、`g;`→`end`、`t;`→`home`、`w;`→`ctrl+shift+left`、`b;`→`ctrl+backspace`、`r;`→`ctrl+delete`、`h;`→`ctrl+home`、`e;`→`ctrl+end`、`d;`→`delete`、`kk;`→`ctrl+shift+k`、`aa;`→`ctrl+a,ctrl+c`、`dd;`→`ctrl+shift+backspace`、`ww;`→`ctrl+shift+left,ctrl+c`、`hh;`→`shift+home,ctrl+c`、`tt;`→`ctrl+shift+home,ctrl+c`、`gg;`→`ctrl+shift+end,ctrl+c`、`xx;`→`ctrl+x`、`ss;`→`shift+home`、`ff;`→`@to-symbol`、`f;`→`@search`；单字母码是"首键 kNoop、末键 kAccepted" | ✅ |
+   | 前缀不对（`qz;`）/ 末键不对（`z,`）/ 只打一半（`z`）/ 带 Ctrl 的 `;` | 全程 kNoop，什么都不发 | ✅ |
+   | `@defaults` 与 `@defaults xy;=ctrl+shift+right` | 分别生效 26 项 / 27 项，`revert.default_shortcuts` 表里有 26 项 | ✅ |
+   | `pp;=@to-symbol-include`、`sm;=shift+home-shift+left`（v8 用 `-` 代替 `,`） | 归一化后按 `shift+home,shift+left` 原样交给 `press_keys` | ✅ |
    | `ff;=@to-symbol`（上屏「今天天气很好，我出门了」11 字，`，`在第 7 位） | 只删 4 个字符（保留 `今天天气很好，`），不发按键 | ✅ |
    | `ff;`（上屏「abc，def」/「abcdef」/「abc，」） | 分别删 3 / 6 / 0（末字符就是符号时记 `nothing to delete before the first symbol`） | ✅ |
-   | `revert/shortcuts` 里写重复触发码 | 两个都不生效并记 `duplicate shortcut trigger disabled: zz;`，按键不吞 | ✅ |
+   | `f;=@search`（上屏「abc」） | 调 `open_url`，URL = `https://www.baidu.com/s?wd=abc`；返回 2 / 0 时分别记 `open_url ignored (previous action still running or too soon)` / `open_url refused the address: …` | ✅ |
+   | `revert/search_url` 换成必应模板 | URL = `https://www.bing.com/search?q=abc`（`%s` 被替换，中文按 UTF-8 百分号编码） | ✅ |
+   | 一次都没上屏就按 `f;` | 不调 `open_url`，只记 `nothing to search, no commit recorded` | ✅ |
+   | `revert/shortcuts` 里写重复触发码 | 两个都不生效并记 `duplicate shortcut trigger disabled: z;`，按键不吞 | ✅ |
    | 与 `revert/trigger` 撞码 / 触发码只有 1 字符 / 少写 `=` / `@未知动作` / 键名写错 | 分别记 `shortcut trigger equals revert/trigger`、`shortcut trigger too short`、`bad shortcut entry ignored`、`unknown built-in action disabled`、`bad key sequence disabled` | ✅ |
    | `press_keys` 返回 2 / 0 | 分别记 `press_keys ignored (previous burst still running or too soon)` / `press_keys refused the sequence: ctrl+z` | ✅ |
-   | 同一个环境里三种触发方式同时配 | `mode=text+shortcuts`（含组合键时再加 `hotkey`），`qq/` 与 `zz;` 都能用 | ✅ |
+   | 同一个环境里三种触发方式同时配 | `mode=text+shortcuts`（含组合键时再加 `hotkey`），`qq/` 与 `z;` 都能用 | ✅ |
 
-   **136 项断言全部 PASS**，`lua_close` 干净（v5 是 72 项；v6 新增场景 H 的 64 项）。
+   **174 项断言全部 PASS**，`lua_close` 干净（v5 72 项；v6 136 项；v8 再 +38 项）。
 
 6. **v7 扫描码修复的验证**（三层，都不碰你的前台窗口）：
 
    - `tests\probe_press_keys.py`（dry-run dll）：**36 个用例 ALL PASS** —— 12 个组合键 + 18 个裸命名键
      的事件串逐字节核对（`ctrl+shift+left` → `1Ds,2As,4Bsx,4Bsx-up,2As-up,1Ds-up`、`home` → `47sx`、
      `numpad5` → `4Cs`、`escape` → `01s`），6 个非法 spec 仍返回 `0`
-   - `tests\smoke_backspace.py`：**136 项断言仍全部 PASS**（场景 F 只数 `_dry_run_sent`、场景 H 用桩
-     `press_keys` 断言 spec 字符串，所以事件串格式变化不影响它们；`revert.lua` 一行没改）
+   - `tests\smoke_backspace.py`：**174 项断言仍全部 PASS**（场景 F 只数 `_dry_run_sent`、场景 H 用桩
+     `press_keys` / `open_url` 断言 spec 字符串与 URL，所以事件串格式变化不影响它们）
    - `tests\probe_scan_e2e.py`：**正式 dll**（用 rime.dll 自带的 Lua 载入）向自建测试窗口真注入：
 
      | 用例（`alpha beta gamma delta`，光标在末尾） | 修复前（只填 wVk） | 修复后（扫描码） |
@@ -266,10 +294,24 @@ PE `Time/Date` 显示 1970-01-01）。
    > 卸载竞态也可能触发访问冲突。彻底修法是 C 侧加 `DllMain(DLL_PROCESS_DETACH)` 等待工作线程
    > 结束（本版未做）。
 
-**未做（重要）**：没有启动小狼毫、没有在 Weasel 里输入过 `qq/`；v7 的"真注入"只发生在本目录
-那两个探针**自己创建的测试窗口**里（`probe_scan_e2e.py` / `probe_inject_variants.py`，注入前会把
-自己的窗口抢到前台，读完选区就关掉），**没有往你的任何窗口发过按键**。真正的删除手感、
-`ss;`/`ww;` 在你常用编辑器里的表现，仍必须由你部署后实测。
+7. **v8（`-` 分步 + `@search`）的验证**：
+
+   - `tests\smoke_backspace.py`：**174 项断言 ALL PASS**（v6 的 136 项全部保留并通过，另加 38 项：
+     26 个默认触发码逐个核对 spec、`f;` 的 URL 与两种失败日志、`-` 归一化、`revert/search_url`
+     换成必应、没上屏就按 `f;` 不发请求）
+   - `tests\probe_prod_dll.py`（正式 dll）：`press_keys` / `press_backspace` / `open_url` 都是 function、
+     没有 dry-run 钩子；7 个非法地址（空串、`ftp://x`、`file:///C:/x`、`nonesuch`、带空格、带 `|`、
+     3000 字符）全部返回 `0` → **RESULT: ALL PASS**
+   - `tests\probe_open_url_e2e.py`（正式 dll + 真浏览器）：用 rime.dll 的 Lua 调
+     `open_url("http://127.0.0.1:8765/probe-open-url.txt")`，本机起一个 `http.server` 当靶子，
+     服务端日志出现 `"GET /probe-open-url.txt HTTP/1.1" 200` —— **证明 `ShellExecuteW`
+     真的把默认浏览器拉起来了**（测试时弹过一次浏览器标签页，事后已关掉服务）
+
+**未做（重要）**：没有启动小狼毫、没有在 Weasel 里输入过 `qq/`；v7/v8 的"真注入"只发生在本目录
+那几个探针**自己创建的测试窗口**里（`probe_scan_e2e.py` / `probe_inject_variants.py`，注入前会把
+自己的窗口抢到前台，读完选区就关掉），**没有往你的任何窗口发过按键**；`open_url` 的真实验证
+也只开了 `127.0.0.1` 上的测试页。真正的删除手感、`ss;`/`ww;`/`f;` 在你常用编辑器里的表现，
+仍必须由你部署后实测。
 
 ---
 
@@ -278,12 +320,13 @@ PE `Time/Date` 显示 1970-01-01）。
 1. **先停服务**：任务栏小狼毫图标右键 → 停止服务（或结束 `WeaselServer.exe`）。
    否则 `sendKeyCode.dll` 正被加载，覆盖会失败（文件占用）。
 2. 覆盖到 `<Rime 用户目录>\lua\<你的目录>\`：
-   - `sendKeyCode.dll` ← 本目录那个（34203 B）—— **v7 只需要换这一个文件**
-   - `revert.lua` ← 本目录那个（28721 B，v7 没改；已经装过 v6 的话不用再动它）
-   > 从 v5 或更早的版本升上来时，两个文件**要成对换**（v6 的快捷键方式需要新版 dll 里的
-   > `press_keys`，只换 Lua 的话日志会写 `press_keys is unavailable`，`qq/` 和 `ff;`
-   > 这类删字功能仍然能用），但**千万别**只换 dll 不换 Lua：dll 还是好的，可只要 Lua
-   > 还挂在 `translators` 里，崩溃就照旧。
+   - `sendKeyCode.dll` ← 本目录那个（36190 B）
+   - `revert.lua` ← 本目录那个（32444 B）
+   - **v8 两个文件都要换**（`-` 的归一化和 `f;` 属于 Lua 侧，`open_url` 属于 dll 侧；
+     只换 Lua 的话 `f;` 会记 `sendKeyCode.open_url is unavailable`，其余快捷键照旧能用）
+   - 想让 26 项快捷键生效，配置里要有一行 `"revert/shortcuts": "@defaults"`
+   > 从 v7（34203 B）升上来时：dll 和 Lua 都要换；从 v6（33457 B）或更早升上来也一样。
+   > 但**千万别**只换 dll 不换 Lua：dll 还是好的，可只要 Lua 还挂在 `translators` 里，崩溃就照旧。
 3. 启动服务并**重新部署**（右键 → 重新部署）。
 
 **接线必须改（v4 起）**：`revert.lua` 现在是 processor，必须挂在 `engine/processors`。
@@ -325,16 +368,17 @@ engine/processors/@after 15: lua_processor@*wanxiang.ziji.sendKeyCode.revert
 
 ## 8. 调参（默认在 `revert.lua`，可用方案配置覆盖，不用重编）
 
-| 配置项 | `revert.lua` 默认（`revert.lua:57` 的 `DEFAULTS`） | 作用 |
+| 配置项 | `revert.lua` 默认（`revert.lua:61` 的 `DEFAULTS`） | 作用 |
 | --- | --- | --- |
 | `revert/trigger` | `"qq/"` | 方式一的触发码，换 `aa/`、`q/` 就改这里 |
 | `revert/hotkey` | `""`（不启用） | 方式二的组合键，如 `"Control+slash"`；填了它**不挤掉**别的触发方式，三种可以同时用 |
-| `revert/shortcuts` | `""`（全不启用） | 方式三的快捷键表（`"zz;=ctrl+z  ss;=shift+home"`，空格分隔、`触发码=动作`）；写 `"@defaults"` 展开 `revert.lua:82` 里那 17 项默认；`@to-symbol` / `@to-symbol-include` / `@delete` 是三个内置动作 |
+| `revert/shortcuts` | `""`（全不启用） | 方式三的快捷键表（`"z;=ctrl+z  ss;=shift+home"`，空格分隔、`触发码=动作`，多步用 `,` 或 `-`）；写 `"@defaults"` 展开 `revert.lua:87` 里那 26 项默认；`@to-symbol` / `@to-symbol-include` / `@delete` / `@search` 是四个内置动作 |
+| `revert/search_url` | `"https://www.baidu.com/s?wd=%s"` | `@search`（`f;`）打开的地址模板，`%s` 换成搜索词（中文自动 percent-encode） |
 | `revert/symbols` | 一串中英标点（`DEFAULTS.symbols`，不含 `-` `_`） | `@to-symbol` 认定哪些字符算"符号"；支持 `\n` `\t` `\\` 转义 |
 | `revert/dll_dir` | `"lua/wanxiang/ziji/sendKeyCode"` | dll 所在目录（相对 `<Rime 用户目录>`） |
 | `revert/stack_size` | `50` | 最多能连撤多少次上屏 |
 | `revert/max_backspaces` | `500` | 单次最多删多少字符（超出部分不删，日志记一条） |
-| `revert/debounce_ms` | `200` | 触发按键之间的防抖（毫秒） |
+| `revert/debounce_ms` | `200` | 触发按键之间的防抖（毫秒），只对方式一生效 |
 | `sendKeyCode.c:35` | `MAX_BACKSPACES 10000` | dll 侧防呆上限（要超过 10000 才需重编） |
 
 异步注入的固定参数（编在 dll 里，改要重编）：`sendKeyCode.c:38-42` 的 `FIRE_DELAY_MS 80`、
@@ -349,6 +393,7 @@ engine/processors/@after 15: lua_processor@*wanxiang.ziji.sendKeyCode.revert
 | `STEP_GAP_MS` | 30 ms | `press_keys` 多步序列里，一步与一步之间等多久（`sendKeyCode.c:65`） |
 | `MAX_CHORD_EVENTS` | 12 | 一步里最多几个键事件（`sendKeyCode.c:68`） |
 | `MAX_SPEC_LEN` | 255 | `press_keys` 接受的 spec 字符串上限（`sendKeyCode.c:67`） |
+| `MAX_URL_LEN` | 2048 | `open_url` 接受的 URL 上限（v8） |
 
 覆盖示例（`xxx.custom.yaml`）：
 
@@ -357,26 +402,29 @@ patch:
   "revert/trigger": "q/"
   "revert/hotkey": "Control+slash"          # 不写 = 方式二不启用
   "revert/shortcuts": "@defaults"           # 不写 = 方式三全不启用；见 使用说明.md 第三节
+  "revert/search_url": "https://www.baidu.com/s?wd=%s"  # f; 用哪个搜索引擎
   "revert/symbols": "，。！？；：、,.!?;:"   # @to-symbol 认哪些字符
   "revert/stack_size": 50
   "revert/max_backspaces": 500
   "revert/debounce_ms": 200
 ```
 
-读取与回落逻辑在 `revert.lua:570` 的 `init(env)`（`revert/stack_size` 等整数读在 `revert.lua:575` 起，
-组合键解析在 `revert.lua:587`，文本触发码的前缀/末键在 `revert.lua:597`，快捷键表由
-`revert.lua:286` 的 `parse_shortcuts()` 处理，`@defaults` 展开 `revert.lua:82` 的 `DEFAULT_SHORTCUTS`）：
-配置为空/非法就用 `DEFAULTS`（`revert.lua:57`），负数与超大值夹到 `LIMITS`（`revert.lua:70`），
-最终生效值打进 `revert.lua:626` 那行日志（`mode=` / `trigger=` / `hotkey=` / `shortcuts=`）。
-触发处理在 `revert.lua:645` 的 `func(key, env)`：先判 `key:release()`，然后依次是
+读取与回落逻辑在 `revert.lua:647` 的 `init(env)`（`revert/stack_size` 等整数读在 `revert.lua:650` 起，
+组合键解析在 `revert.lua:665`，文本触发码的前缀/末键在 `revert.lua:675`，`revert/search_url` 在
+`revert.lua:659`，快捷键表由 `revert.lua:300` 的 `parse_shortcuts()` 处理，`@defaults` 展开
+`revert.lua:87` 的 `DEFAULT_SHORTCUTS`）：
+配置为空/非法就用 `DEFAULTS`（`revert.lua:61`），负数与超大值夹到 `LIMITS`（`revert.lua:75`），
+最终生效值打进 `revert.lua:704` 那行日志（`mode=` / `trigger=` / `hotkey=` / `shortcuts=` / `search_url=`）。
+触发处理在 `revert.lua:724` 的 `func(key, env)`：先判 `key:release()`，然后依次是
 组合键分支 → **快捷键分支**（要求 `key` 不带修饰键、`context.input == action.prefix`、
-`key.keycode == action.code`，命中就 `context:clear()` 后发键）→ 主文本触发码分支
-（前缀 + 末键 + `debounce`）。三种方式互不排斥。删字走 `revert.lua:464` 的 `fire_delete(env)`
-与 `revert.lua:489` 的 `fire_to_symbol(env, include)`，发键走 `revert.lua:542` 的 `fire_keys(env, action)`；
-C 侧返回 0（被忽略）时由 `revert.lua:399` 的 `push_back()` 把那条记录放回栈尾。
+`key.keycode == action.code`，命中就 `context:clear()` 后按动作类型分发）→ 主文本触发码分支
+（前缀 + 末键 + `debounce`）。三种方式互不排斥。删字走 `revert.lua:484` 的 `fire_delete(env)`
+与 `revert.lua:509` 的 `fire_to_symbol(env, include)`，发键走 `revert.lua:562` 的 `fire_keys(env, action)`，
+搜索走 `revert.lua:599` 的 `fire_search(env)`；
+C 侧返回 0（被忽略）时由 `revert.lua:419` 的 `push_back()` 把那条记录放回栈尾。
 
 触发码规则（**方式一和方式三的触发码都要**）：**每个字符都必须在 `speller/alphabet` 里**。`/` 与 `;`
-都在 `wanxiang_pro.schema.yaml:276` 的 alphabet 末尾（`` ` `` `;` `/` `\`），所以 `qq/`、`aa/`、`zz;`
+都在 `wanxiang_pro.schema.yaml:276` 的 alphabet 末尾（`` ` `` `;` `/` `\`），所以 `qq/`、`aa/`、`z;`
 直接可用，不用改方案；保持"不要以 `/` 开头"即可避开万象自己的 `/xxx` 触发码。
 方式二（`revert/hotkey` 组合键）**不经过输入编码**，既不需要 alphabet、也不会被标点或按键绑定抢走。
 
@@ -406,6 +454,11 @@ C 侧返回 0（被忽略）时由 `revert.lua:399` 的 `push_back()` 把那条�
     the first symbol`）。上屏之后动过光标、按过退格、换过窗口，位置就可能不对。
 11. **`revert/shortcuts` 里重复的触发码一律不生效**（同一触发码写两遍、或与 `revert/trigger`
     撞码）——有意设计，避免"一个触发码两个动作"；日志会写明是哪一项被停用。
+12. **`f;`（`@search`）会真的启动默认浏览器**：它用**最后一次上屏的原文**拼 URL，删过一部分或
+    动过光标就可能搜到别的东西；`ShellExecuteW` 被安全软件/UIPI 拦住时不会打开，也不会报错给
+    前台，只能看日志有没有 `search … -> …`。地址模板只接受 `http(s)://`，别的协议一律拒绝。
+13. **`-` 与 `,` 完全等价**，两种写法混用也行（`shift+home-ctrl+c`、`shift+home,ctrl+c` 同一个
+    结果）；每一步之间会等 30 ms，并按"修饰键按下 → 键按下 → 键抬起 → 修饰键抬起"发完再下一步。
 
 ---
 

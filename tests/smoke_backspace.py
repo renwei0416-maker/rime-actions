@@ -44,7 +44,7 @@ import sys
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # 仓库根目录（tests/ 的上一层）
+BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MINGW_BIN = os.environ.get("MINGW_BIN", r"C:\msys64\mingw64\bin")
 WEASEL_DIR = os.environ.get("WEASEL_DIR", r"C:\Program Files\Rime\weasel-0.17.4")
 
@@ -68,7 +68,7 @@ def build_dry_run_dll():
     cmd = [
         os.path.join(MINGW_BIN, "gcc.exe"), "-shared", "-fPIC",
         "-DSENDKEYCODE_DRY_RUN", "-o", out, "sendKeyCode.c",
-        "-Iinclude", "-L" + WEASEL_DIR, "-luser32", "-lrime", "-O2",
+        "-Iinclude", "-L" + WEASEL_DIR, "-luser32", "-lrime", "-lshell32", "-O2",
         "-Wl,--no-insert-timestamp",
     ]
     proc = subprocess.run(cmd, cwd=BASE, env=env, capture_output=True, text=True)
@@ -81,14 +81,13 @@ def build_dry_run_dll():
 
 def prepare_fake_userdir():
     os.makedirs(DLL_DIR, exist_ok=True)
-    # 假用户目录里的这份 dll 只是摆设：dry-run 测试通过 cpath 加载的是
-    # _testdata\dryrun 里那份。所以没有正式 dll 时（仓库里不存二进制），
-    # 就拿刚编好的 dry-run dll 顶上，测试结果不受影响。
-    prod = os.path.join(os.environ.get("DLLDIR", BASE), "sendKeyCode.dll")
-    if not os.path.isfile(prod):
-        prod = os.path.join(DLL_DIR_DRY, "sendKeyCode.dll")
-        print("note: no production sendKeyCode.dll; the fake user dir gets the dry-run build")
-    shutil.copy2(prod, os.path.join(DLL_DIR, "sendKeyCode.dll"))
+    src = os.path.join(BASE, "sendKeyCode.dll")
+    if not os.path.isfile(src):
+        # 仓库里不带二进制：用刚编出来的 dry-run dll 顶上（场景 E 会读到它，
+        # 但 E 只验"配置写错时的日志"，不真发键，所以用哪份 dll 都一样）
+        src = os.path.join(DLL_DIR_DRY, "sendKeyCode.dll")
+        print("note: no production sendKeyCode.dll in repo root, using the dry-run build for scenario E")
+    shutil.copy2(src, os.path.join(DLL_DIR, "sendKeyCode.dll"))
 
 
 LUA_SRC = r"""
@@ -417,6 +416,10 @@ local keysent = {}
 local keyret = 1
 mod.press_keys = function(spec) keysent[#keysent + 1] = spec return keyret end
 
+local urlsent = {}
+local urlret = 1
+mod.open_url = function(url) urlsent[#urlsent + 1] = url return urlret end
+
 local function count_shortcuts()
   local s = last_log():match("shortcuts=([^ ]*)")
   if not s or s == "-" then return 0 end
@@ -438,8 +441,8 @@ local cfgH = cfg_plain({
 local envH, ctxH = new_env(cfgH)
 revert.init(envH)
 rec("H_init_log", last_log())
-rec("H_mode_text", tostring(log_has("mode=text") and log_has("shortcuts=zz;")))
-rec("H_default_count", count_shortcuts())      -- 17 defaults + pq;
+rec("H_mode_text", tostring(log_has("mode=text") and log_has("shortcuts=z;")))
+rec("H_default_count", count_shortcuts())      -- 26 defaults + pq;
 rec("H_default_table", #revert.default_shortcuts)
 
 -- 每个默认触发码 -> 本来会发出去的那串按键
@@ -448,28 +451,36 @@ local function h_try(tag, s)
   rec(tag .. "_ret", type_text(revert, envH, ctxH, s))
   rec(tag .. "_spec", table.concat(keysent, "|"))
 end
-h_try("H_zz", "zz;")
-h_try("H_yy", "yy;")
+h_try("H_z",  "z;")
+h_try("H_y",  "y;")
+h_try("H_a",  "a;")
+h_try("H_c",  "c;")
+h_try("H_v",  "v;")
+h_try("H_s",  "s;")
+h_try("H_x",  "x;")
+h_try("H_g",  "g;")
+h_try("H_t",  "t;")
+h_try("H_w",  "w;")
+h_try("H_b",  "b;")
+h_try("H_r",  "r;")
+h_try("H_h",  "h;")
+h_try("H_e",  "e;")
+h_try("H_d",  "d;")
+h_try("H_kk", "kk;")
 h_try("H_aa", "aa;")
-h_try("H_cc", "cc;")
-h_try("H_vv", "vv;")
+h_try("H_dd", "dd;")
+h_try("H_ww", "ww;")
+h_try("H_hh", "hh;")
+h_try("H_tt", "tt;")
+h_try("H_gg", "gg;")
 h_try("H_xx", "xx;")
 h_try("H_ss", "ss;")
-h_try("H_gg", "gg;")
-h_try("H_tt", "tt;")
-h_try("H_ww", "ww;")
-h_try("H_bb", "bb;")
-h_try("H_rr", "rr;")
-h_try("H_hh", "hh;")
-h_try("H_ee", "ee;")
-h_try("H_dd", "dd;")
-h_try("H_kk", "kk;")
 
 -- 不吞键：前缀不对 / 末字符不对 / 只打了一半 / 带修饰键
 h_try("H_wrong_prefix", "qz;")
-h_try("H_wrong_final", "zz,")
-h_try("H_half", "zz")
-ctxH.input = "zz"
+h_try("H_wrong_final", "z,")
+h_try("H_half", "z")
+ctxH.input = "z"
 keysent = {}
 rec("H_ctrl_ret", tostring(feed(revert, envH, ctxH, key(0x3B, { ctrl = true, modifier = 4 }))))
 rec("H_ctrl_spec", table.concat(keysent, "|"))
@@ -523,19 +534,36 @@ rec("H_ff_trailing_symbol_log", tostring(log_has("nothing to delete before the f
 -- press_keys 的返回值处理：2 = 忙，0 = 被拒
 logs = {}
 keyret = 2
-rec("H_busy_ret", type_text(revert, envH, ctxH, "zz;"))
+rec("H_busy_ret", type_text(revert, envH, ctxH, "z;"))
 rec("H_busy_log", tostring(log_has("press_keys ignored")))
 keyret = 0
-rec("H_refused_ret", type_text(revert, envH, ctxH, "zz;"))
+rec("H_refused_ret", type_text(revert, envH, ctxH, "z;"))
 rec("H_refused_log", tostring(log_has("press_keys refused the sequence: ctrl+z")))
 keyret = 1
+
+-- @search（f;）：打开浏览器搜索最后一次上屏的原文
+ctxH.input = ""
+commit(ctxH, "\u{4eca}\u{5929}\u{5929}\u{6c14}\u{5f88}\u{597d}")
+urlsent = {}
+logs = {}
+rec("H_f_ret", type_text(revert, envH, ctxH, "f;"))
+rec("H_f_url", table.concat(urlsent, "|"))
+urlret = 2
+type_text(revert, envH, ctxH, "f;")
+rec("H_f_busy_log", tostring(log_has("open_url ignored")))
+urlret = 0
+urlsent = {}
+type_text(revert, envH, ctxH, "f;")
+rec("H_f_refused_url", table.concat(urlsent, "|"))
+rec("H_f_refused_log", tostring(log_has("open_url refused the address")))
+urlret = 1
 revert.fini(envH)
 
 -- H2: @to-symbol-include / 多步序列 / @delete
 logs = {}
 local cfgH2 = cfg_plain({
   ["revert/trigger"]        = "qq/",
-  ["revert/shortcuts"]      = "pp;=@to-symbol-include sm;=shift+home,shift+left dq;=@delete",
+  ["revert/shortcuts"]      = "pp;=@to-symbol-include sm;=shift+home-shift+left dq;=@delete",
   ["revert/symbols"]        = "，。",
   ["revert/dll_dir"]        = DLLREL,
   ["revert/max_backspaces"] = 500,
@@ -604,6 +632,33 @@ local envH5 = new_env(cfgH5)
 revert.init(envH5)
 rec("H5_count", count_shortcuts())
 revert.fini(envH5)
+
+-- H6: 自定义搜索地址模板（revert/search_url 可配置）
+logs = {}
+local cfgH6 = cfg_plain({
+  ["revert/trigger"]     = "qq/",
+  ["revert/shortcuts"]   = "f;=@search",
+  ["revert/search_url"]  = "https://www.bing.com/search?q=%s",
+  ["revert/dll_dir"]     = DLLREL,
+  ["revert/debounce_ms"] = 0,
+})
+local envH6, ctxH6 = new_env(cfgH6)
+revert.init(envH6)
+commit(ctxH6, "abc")
+urlsent = {}
+rec("H6_search_ret", type_text(revert, envH6, ctxH6, "f;"))
+rec("H6_search_url", table.concat(urlsent, "|"))
+
+-- H7: 还没上屏过就按 f; -> 什么都不做
+logs = {}
+local envH7, ctxH7 = new_env(cfgH6)
+revert.init(envH7)
+urlsent = {}
+rec("H7_search_ret", type_text(revert, envH7, ctxH7, "f;"))
+rec("H7_search_url", "[" .. table.concat(urlsent, "|") .. "]")
+rec("H7_search_log", tostring(log_has("nothing to search")))
+revert.fini(envH6)
+revert.fini(envH7)
 
 -- =====================================================================
 -- E. config: wrong dll_dir -> graceful failure, nothing injected
@@ -854,33 +909,37 @@ def main():
         "G2_injected": "3",
         # H: shortcuts -> press_keys / @to-symbol / @delete
         "H_mode_text": "true",
-        "H_default_count": "18",
-        "H_default_table": "17",
-        "H_zz_ret": "2,2,1",
-        "H_zz_spec": "ctrl+z",
-        "H_yy_spec": "ctrl+y",
-        "H_aa_spec": "ctrl+a",
-        "H_cc_spec": "ctrl+c",
-        "H_vv_spec": "ctrl+v",
-        "H_xx_spec": "ctrl+x",
-        "H_ss_spec": "shift+home",
-        "H_gg_ret": "2,2,1",
-        "H_gg_spec": "end",
-        "H_tt_ret": "2,2,1",
-        "H_tt_spec": "home",
-        "H_ww_ret": "2,2,1",
-        "H_ww_spec": "ctrl+shift+left",
-        "H_bb_spec": "ctrl+backspace",
-        "H_rr_spec": "ctrl+delete",
-        "H_hh_spec": "ctrl+home",
-        "H_ee_spec": "ctrl+end",
-        "H_dd_spec": "ctrl+shift+backspace",
-        "H_kk_spec": "ctrl+shift+k",
+        "H_default_count": "27",
+        "H_default_table": "26",
+        "H_z_ret": "2,1",   "H_z_spec": "ctrl+z",
+        "H_y_ret": "2,1",   "H_y_spec": "ctrl+y",
+        "H_a_ret": "2,1",   "H_a_spec": "ctrl+a",
+        "H_c_ret": "2,1",   "H_c_spec": "ctrl+c",
+        "H_v_ret": "2,1",   "H_v_spec": "ctrl+v",
+        "H_s_ret": "2,1",   "H_s_spec": "up",
+        "H_x_ret": "2,1",   "H_x_spec": "down",
+        "H_g_ret": "2,1",   "H_g_spec": "end",
+        "H_t_ret": "2,1",   "H_t_spec": "home",
+        "H_w_ret": "2,1",   "H_w_spec": "ctrl+shift+left",
+        "H_b_ret": "2,1",   "H_b_spec": "ctrl+backspace",
+        "H_r_ret": "2,1",   "H_r_spec": "ctrl+delete",
+        "H_h_ret": "2,1",   "H_h_spec": "ctrl+home",
+        "H_e_ret": "2,1",   "H_e_spec": "ctrl+end",
+        "H_d_ret": "2,1",   "H_d_spec": "delete",
+        "H_kk_ret": "2,2,1", "H_kk_spec": "ctrl+shift+k",
+        "H_aa_ret": "2,2,1", "H_aa_spec": "ctrl+a,ctrl+c",
+        "H_dd_ret": "2,2,1", "H_dd_spec": "ctrl+shift+backspace",
+        "H_ww_ret": "2,2,1", "H_ww_spec": "ctrl+shift+left,ctrl+c",
+        "H_hh_ret": "2,2,1", "H_hh_spec": "shift+home,ctrl+c",
+        "H_tt_ret": "2,2,1", "H_tt_spec": "ctrl+shift+home,ctrl+c",
+        "H_gg_ret": "2,2,1", "H_gg_spec": "ctrl+shift+end,ctrl+c",
+        "H_xx_ret": "2,2,1", "H_xx_spec": "ctrl+x",
+        "H_ss_ret": "2,2,1", "H_ss_spec": "shift+home",
         "H_wrong_prefix_ret": "2,2,2",
         "H_wrong_prefix_spec": "",
-        "H_wrong_final_ret": "2,2,2",
+        "H_wrong_final_ret": "2,2",
         "H_wrong_final_spec": "",
-        "H_half_ret": "2,2",
+        "H_half_ret": "2",
         "H_half_spec": "",
         "H_ctrl_ret": "2",
         "H_ctrl_spec": "",
@@ -896,10 +955,15 @@ def main():
         "H_ff_no_symbol_log": "false",
         "H_ff_trailing_symbol": "[]",
         "H_ff_trailing_symbol_log": "true",
-        "H_busy_ret": "2,2,1",
+        "H_busy_ret": "2,1",
         "H_busy_log": "true",
-        "H_refused_ret": "2,2,1",
+        "H_refused_ret": "2,1",
         "H_refused_log": "true",
+        "H_f_ret": "2,1",
+        "H_f_url": "https://www.baidu.com/s?wd=%E4%BB%8A%E5%A4%A9%E5%A4%A9%E6%B0%94%E5%BE%88%E5%A5%BD",
+        "H_f_busy_log": "true",
+        "H_f_refused_url": "https://www.baidu.com/s?wd=%E4%BB%8A%E5%A4%A9%E5%A4%A9%E6%B0%94%E5%BE%88%E5%A5%BD",
+        "H_f_refused_log": "true",
         "H2_count": "3",
         "H2_pp_ret": "2,2,1",
         "H2_pp_injected": "5",
@@ -915,8 +979,13 @@ def main():
         "H3_badentry_log": "true",
         "H3_dup_fire_ret": "2,2,2",
         "H3_dup_fire_spec": "",
-        "H4_count": "18",
-        "H5_count": "17",
+        "H4_count": "27",
+        "H5_count": "26",
+        "H6_search_ret": "2,1",
+        "H6_search_url": "https://www.bing.com/search?q=abc",
+        "H7_search_ret": "2,1",
+        "H7_search_url": "[]",
+        "H7_search_log": "true",
         # E: broken dll_dir
         "E_good_entry_removed": "true",
         "E_cpath_clean": "true",

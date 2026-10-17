@@ -1,9 +1,10 @@
 /*
  * 小狼毫（Rime / Weasel）用的 Windows 专用 Lua C 模块。
  *
- * 对外提供两个函数：
+ * 对外提供三个函数：
  *   press_backspace(count) —— 请求"删除 count 个字符"
  *   press_keys(spec)       —— 请求"发一串按键组合"
+ *   open_url(url)          —— 请求"用默认浏览器打开这个网址"（http/https）
  *
  * press_keys 的 spec 语法（大小写都行，多余空格会被忽略）：
  *   "ctrl+z"                  发一次 Ctrl+Z
@@ -35,6 +36,10 @@
  *   press_keys      —— 1 表示已排队；
  *                      2 表示被忽略（上一个还在发 / 距上次太近，不是参数问题）；
  *                      0 表示参数非法（spec 解析不出任何按键）。
+ *   open_url        —— 1 表示已排队；
+ *                      2 表示被忽略（上一个还在跑 / 距上次太近）；
+ *                      0 表示参数非法（空串、太长、或者不是 http/https 地址）。
+ *                      地址里的中文要由调用方先做 UTF-8 percent-encode。
  *
  * 由用户提供的 sendKeyCode.c 改来：删掉了 press_ctrl_z()，先换成
  * press_backspace()，再加上通用的 press_keys()。
@@ -45,6 +50,7 @@
 #include <lua.h>
 #include <lauxlib.h>
 #include <windows.h>
+#include <shellapi.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -67,11 +73,13 @@
 
 #define MAX_SPEC_LEN   255  /* press_keys 的 spec 最长字符数 */
 #define MAX_CHORD_EVENTS 12 /* 单步组合键最多产生的事件数（4 修饰 + 键按下抬起 + 4 修饰释放）*/
+#define MAX_URL_LEN   2048  /* open_url 的网址最长字符数（percent-encode 之后）*/
 
 /* 待发槽位、忙标志、上次注入时刻：跨线程访问，用原子操作读写 */
-static volatile LONG      g_pending_kind  = 0;  /* 0=空闲 1=退格 2=组合键 */
+static volatile LONG      g_pending_kind  = 0;  /* 0=空闲 1=退格 2=组合键 3=打开网址 */
 static volatile LONG      g_pending_count = 0;  /* kind==1 时要发几个退格 */
 static char               g_pending_spec[MAX_SPEC_LEN + 1]; /* kind==2 时的按键串 */
+static char               g_pending_url[MAX_URL_LEN + 1];   /* kind==3 时的网址 */
 static volatile LONG      g_busy       = 0;
 static volatile ULONGLONG g_last_start = 0;
 static PVOID              g_worker     = NULL;
@@ -83,6 +91,9 @@ static volatile LONG g_dry_run_sent   = 0;
 #define DRY_RUN_MAX_EVENTS 512
 static char          g_dry_run_log[DRY_RUN_MAX_EVENTS][20];
 static volatile LONG g_dry_run_events = 0;
+/* 打开的网址也只记录、不真开 */
+static volatile LONG g_dry_run_url_opens = 0;
+static char          g_dry_run_url_text[MAX_URL_LEN + 1];
 #endif
 
 /* 把一批按键发出去，返回成功发出的按键个数 */
@@ -435,6 +446,37 @@ static int inject_backspaces(int count)
     return done;
 }
 
+/* 用默认浏览器打开一个网址（只在后台线程里调用）。
+ * 网址必须是 http/https、且中文已由调用方 percent-encode；这里再转成宽字符
+ * 交给 ShellExecuteW —— 走的是系统"打开"关联，不经过 cmd.exe，所以不闪黑框。 */
+static void open_url_now(const char *url)
+{
+#ifdef SENDKEYCODE_DRY_RUN
+    size_t n = strlen(url);
+
+    InterlockedIncrement(&g_dry_run_url_opens);
+    if (n > MAX_URL_LEN)
+        n = MAX_URL_LEN;
+    memcpy(g_dry_run_url_text, url, n);
+    g_dry_run_url_text[n] = '\0';
+#else
+    WCHAR *wide;
+    int need = MultiByteToWideChar(CP_UTF8, 0, url, -1, NULL, 0);
+
+    if (need <= 0)
+        return;
+
+    wide = (WCHAR *)malloc(sizeof(WCHAR) * (size_t)need);
+    if (!wide)
+        return;
+
+    if (MultiByteToWideChar(CP_UTF8, 0, url, -1, wide, need) > 0)
+        ShellExecuteW(NULL, L"open", wide, NULL, NULL, SW_SHOWNORMAL);
+
+    free(wide);
+#endif
+}
+
 /* 后台线程：只在这里发按键 */
 static DWORD WINAPI worker_main(LPVOID param)
 {
@@ -448,8 +490,10 @@ static DWORD WINAPI worker_main(LPVOID param)
             Sleep(FIRE_DELAY_MS);
             if (kind == 1)
                 inject_backspaces((int)count);
-            else
+            else if (kind == 2)
                 inject_keys(g_pending_spec);
+            else if (kind == 3)
+                open_url_now(g_pending_url);
             InterlockedExchange(&g_busy, 0);
         } else {
             Sleep(WORKER_POLL_MS);
@@ -564,9 +608,62 @@ static int l_press_keys(lua_State *L)
     return 1;
 }
 
+/* 只放行 http:// 和 https://：别让这条路被用来启动本地程序或打开文件 */
+static BOOL url_is_valid(const char *url)
+{
+    size_t i;
+
+    if (strncmp(url, "http://", 7) != 0 && strncmp(url, "https://", 8) != 0)
+        return FALSE;
+
+    for (i = 0; url[i]; i++) {
+        unsigned char c = (unsigned char)url[i];
+        /* 空白、控制字符、以及会被 cmd/shell 当成元字符的几个一律拒绝 */
+        if (c <= 0x20 || c == 0x7F || c == '"' || c == '<' || c == '>' || c == '|')
+            return FALSE;
+    }
+    return TRUE;
+}
+
+static int l_open_url(lua_State *L)
+{
+    size_t len = 0;
+    const char *url = luaL_checklstring(L, 1, &len);
+
+    if (len == 0 || len > MAX_URL_LEN) {
+        lua_pushinteger(L, 0);
+        return 1;
+    }
+
+    if (!url_is_valid(url)) {
+        lua_pushinteger(L, 0);
+        return 1;
+    }
+
+    if (!claim_slot()) {
+        /* 2 = 被忽略：上一个请求还在跑，或距上次太近 */
+        lua_pushinteger(L, 2);
+        return 1;
+    }
+
+    if (!ensure_worker()) {
+        /* 线程建不出来时退回同步打开：这里只是开个浏览器，没有重入风险 */
+        open_url_now(url);
+        InterlockedExchange(&g_busy, 0);
+        lua_pushinteger(L, 1);
+        return 1;
+    }
+
+    memcpy(g_pending_url, url, len);
+    g_pending_url[len] = '\0';
+    InterlockedExchange(&g_pending_count, 1);
+    InterlockedExchange(&g_pending_kind, 3);
+    lua_pushinteger(L, 1);
+    return 1;
+}
+
 #ifdef SENDKEYCODE_DRY_RUN
-/* 只有自测 dll 才有：返回"本来会发出去的按键总数" */
-static int l_dry_run_sent(lua_State *L)
+/* 只有自测 dll 才有：返回"本来会发出去的按键总数" */static int l_dry_run_sent(lua_State *L)
 {
     lua_pushinteger(L, (lua_Integer)g_dry_run_sent);
     return 1;
@@ -578,6 +675,8 @@ static int l_dry_run_reset(lua_State *L)
     (void)L;
     InterlockedExchange(&g_dry_run_sent, 0);
     InterlockedExchange(&g_dry_run_events, 0);
+    InterlockedExchange(&g_dry_run_url_opens, 0);
+    g_dry_run_url_text[0] = '\0';
     return 0;
 }
 
@@ -600,15 +699,32 @@ static int l_dry_run_events(lua_State *L)
     }
     return 1;
 }
+
+/* 只有自测 dll 才有：返回"本来会打开的网址"打开了几次 */
+static int l_dry_run_url_opens(lua_State *L)
+{
+    lua_pushinteger(L, (lua_Integer)g_dry_run_url_opens);
+    return 1;
+}
+
+/* 只有自测 dll 才有：返回最后一次"本来会打开的网址" */
+static int l_dry_run_url(lua_State *L)
+{
+    lua_pushstring(L, g_dry_run_url_text);
+    return 1;
+}
 #endif
 
 static const luaL_Reg module_functions[] = {
     {"press_backspace", l_press_backspace},
     {"press_keys",      l_press_keys},
+    {"open_url",        l_open_url},
 #ifdef SENDKEYCODE_DRY_RUN
     {"_dry_run_sent",   l_dry_run_sent},
     {"_dry_run_reset",  l_dry_run_reset},
     {"_dry_run_events", l_dry_run_events},
+    {"_dry_run_url_opens", l_dry_run_url_opens},
+    {"_dry_run_url",       l_dry_run_url},
 #endif
     {NULL, NULL}
 };

@@ -29,7 +29,7 @@ set "PATH=%MINGW_BIN%;%PATH%"
 cd /d "%~dp0"
 
 echo [1/2] compiling and linking ^(sendKeyCode.c only^) ...
-gcc -shared -fPIC -o sendKeyCode.dll sendKeyCode.c -Iinclude -L"%WEASEL_DIR%" -luser32 -lrime -O2 -Wl,--no-insert-timestamp
+gcc -shared -fPIC -o sendKeyCode.dll sendKeyCode.c -Iinclude -L"%WEASEL_DIR%" -luser32 -lshell32 -lrime -O2 -Wl,--no-insert-timestamp
 if errorlevel 1 (
   echo [ERROR] build failed
   exit /b 1

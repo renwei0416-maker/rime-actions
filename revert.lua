@@ -38,12 +38,16 @@
 --     "revert/debounce_ms": 200                           # 连按保护（毫秒），只对文本触发码生效
 --
 -- revert/shortcuts 的写法：每项 "触发码=动作"，用空格/换行隔开。
---   动作有三种：
---     按键序列            例如 "ctrl+z"、"shift+home"、"shift+home,shift+left"
---                         （逗号分隔 = 依次发多步；可用键名见使用说明.md）
+--   动作有五种：
+--     按键序列            例如 "ctrl+z"、"shift+home"
+--     ～多步用 - 或 ,～     例如 "shift+home-ctrl+c"、"shift+home,ctrl+c"
+--                         （先发完第一步、把按键全部抬起，再发下一步；
+--                           两步之间 dll 会停 STEP_GAP_MS=30 毫秒）
 --     @to-symbol          删到前一个符号，保留符号
 --     @to-symbol-include  删到前一个符号，连符号一起删
 --     @delete             同文本触发码：删掉最近一笔上屏
+--     @search             打开默认浏览器，搜索"最后一次上屏"的原文
+--                         （地址模板见 revert/search_url，默认百度）
 --   写 "@defaults" 表示启用下面 DEFAULT_SHORTCUTS 里预置的那张表，
 --   也可以和自定义项混写："@defaults xy;=ctrl+shift+right"
 --
@@ -58,6 +62,7 @@ local DEFAULTS = {
     trigger        = "qq/",
     hotkey         = "",
     shortcuts      = "",
+    search_url     = "https://www.baidu.com/s?wd=%s",
     symbols        = "，。！？；：、,.!?;:\\\"“”‘’…—～「」『』【】《》〈〉（）()［］[]｛｝{}<>+*/\\\\|&^%$#@~`·°±×÷",
     dll_dir        = "lua/wanxiang/ziji/sendKeyCode",
     stack_size     = 50,
@@ -80,23 +85,32 @@ local TRIGGER_OFF = { none = true, off = true, ["-"] = true }
 --   "revert/shortcuts": "@defaults"
 -- （或把它抄进自己的配置里）之后才生效。
 local DEFAULT_SHORTCUTS = {
-    { "zz;", "ctrl+z" },               -- 撤销
-    { "yy;", "ctrl+y" },               -- 重做
-    { "aa;", "ctrl+a" },               -- 全选
-    { "cc;", "ctrl+c" },               -- 复制
-    { "vv;", "ctrl+v" },               -- 粘贴
-    { "xx;", "ctrl+x" },               -- 剪切
-    { "ss;", "shift+home" },           -- 从光标选到行首
-    { "gg;", "end" },                  -- 跳到行尾
-    { "tt;", "home" },                 -- 跳到行首
-    { "ww;", "ctrl+shift+left" },      -- 选中前一个词（Ctrl+Shift+←）
-    { "bb;", "ctrl+backspace" },       -- 删前一个词
-    { "rr;", "ctrl+delete" },          -- 删后一个词
-    { "hh;", "ctrl+home" },            -- 跳到文首
-    { "ee;", "ctrl+end" },             -- 跳到文末
-    { "dd;", "ctrl+shift+backspace" }, -- 按你给的表保留（并非所有程序都是"删整行"）
-    { "kk;", "ctrl+shift+k" },         -- 删除整行（VS Code）
-    { "ff;", "@to-symbol" },           -- 删到前一个符号（保留符号）
+    { "z;",  "ctrl+z" },                  -- 撤销
+    { "y;",  "ctrl+y" },                  -- 重做
+    { "a;",  "ctrl+a" },                  -- 全选
+    { "c;",  "ctrl+c" },                  -- 复制
+    { "v;",  "ctrl+v" },                  -- 粘贴
+    { "s;",  "up" },                      -- 上移一行
+    { "x;",  "down" },                    -- 下移一行
+    { "g;",  "end" },                     -- 跳到行尾
+    { "t;",  "home" },                    -- 跳到行首
+    { "w;",  "ctrl+shift+left" },         -- 选中前一个词
+    { "b;",  "ctrl+backspace" },          -- 删前一个词
+    { "r;",  "ctrl+delete" },             -- 删后一个词
+    { "h;",  "ctrl+home" },               -- 跳到文首
+    { "e;",  "ctrl+end" },                -- 跳到文末
+    { "d;",  "delete" },                  -- 删除（Del）
+    { "kk;", "ctrl+shift+k" },            -- 删除整行（VS Code 等）
+    { "aa;", "ctrl+a-ctrl+c" },           -- 复制全文
+    { "dd;", "ctrl+shift+backspace" },    -- 按你给的表保留（并非所有程序都是"删整行"）
+    { "ww;", "ctrl+shift+left-ctrl+c" },  -- 复制前一个词
+    { "hh;", "shift+home-ctrl+c" },       -- 复制整行
+    { "tt;", "ctrl+shift+home-ctrl+c" },  -- 复制光标之上所有内容
+    { "gg;", "ctrl+shift+end-ctrl+c" },   -- 复制光标之下所有内容
+    { "xx;", "ctrl+x" },                  -- 剪切
+    { "ss;", "shift+home" },              -- 从光标选到行首
+    { "ff;", "@to-symbol" },              -- 删到前一个符号（保留符号）
+    { "f;",  "@search" },                 -- 用浏览器搜索最后一次上屏的内容
 }
 
 -- 处理器返回值：2 = 我不处理，交给后面的组件；1 = 我处理了，后面的都别管
@@ -336,6 +350,8 @@ local function parse_shortcuts(spec, env)
             if log and log.error then
                 log.error("revert.lua: shortcut trigger equals revert/trigger, disabled: " .. trigger)
             end
+        elseif item.action == "@search" then
+            action.kind = "search"
         elseif item.action == "@to-symbol" then
             action.kind, action.include = "symbol", false
         elseif item.action == "@to-symbol-include" then
@@ -346,11 +362,15 @@ local function parse_shortcuts(spec, env)
             if log and log.error then
                 log.error("revert.lua: unknown built-in action disabled: " .. item.action)
             end
-        elseif valid_key_spec(item.action) then
-            action.kind, action.spec = "keys", item.action
-        elseif log and log.error then
-            log.error("revert.lua: bad key sequence disabled: trigger=" .. trigger
-                .. " action=" .. tostring(item.action))
+        else
+            -- 多步可以写成 "shift+home-ctrl+c"（用户习惯的 -），发给 dll 前统一成 ","
+            local normalized = item.action:gsub("%-", ",")
+            if valid_key_spec(normalized) then
+                action.kind, action.spec = "keys", normalized
+            elseif log and log.error then
+                log.error("revert.lua: bad key sequence disabled: trigger=" .. trigger
+                    .. " action=" .. tostring(item.action))
+            end
         end
 
         if action.kind then actions[#actions + 1] = action end
@@ -566,6 +586,63 @@ local function fire_keys(env, action)
     end
 end
 
+-- 把一段 UTF-8 文本转成百分号编码（浏览器地址栏要的就是这个）
+local function percent_encode(text)
+    if type(text) ~= "string" or text == "" then return "" end
+
+    return (text:gsub("[^A-Za-z0-9%-%._~]", function(ch)
+        return string.format("%%%02X", string.byte(ch))
+    end))
+end
+
+-- 打开默认浏览器搜索"最后一次上屏"的原文（@search）
+local function fire_search(env)
+    if not SendKeyCode or not SendKeyCode.open_url then
+        if log and log.error then
+            log.error("revert.lua: sendKeyCode.open_url is unavailable"
+                .. (load_error and (" (" .. tostring(load_error) .. ")") or ""))
+        end
+        return
+    end
+
+    local stack = env.revert_stack
+    local entry = stack and stack[#stack]
+    local text = entry and entry.text
+    if type(text) ~= "string" or text == "" then
+        if log and log.info then
+            log.info("revert.lua: nothing to search, no commit recorded")
+        end
+        return
+    end
+
+    local encoded = percent_encode(text)
+    local template = env.revert_search_url or DEFAULTS.search_url
+    local url
+    if template:find("%%s", 1) then
+        url = template:gsub("%%s", function() return encoded end)
+    else
+        -- 模板里没写 %s：把词接在末尾，至少不会把查的内容丢掉
+        url = template .. encoded
+    end
+
+    local ok, result = pcall(SendKeyCode.open_url, url)
+    if not ok then
+        if log and log.error then
+            log.error("revert.lua: open_url failed: " .. tostring(result))
+        end
+    elseif result == 2 then
+        if log and log.info then
+            log.info("revert.lua: open_url ignored (previous action still running or too soon)")
+        end
+    elseif result == 0 then
+        if log and log.error then
+            log.error("revert.lua: open_url refused the address: " .. tostring(url))
+        end
+    elseif log and log.info then
+        log.info("revert.lua: search " .. text .. " -> " .. url)
+    end
+end
+
 -- ------------------------------------------------------------- 组件接口
 local function init(env)
     local config = env.engine and env.engine.schema and env.engine.schema.config
@@ -579,6 +656,7 @@ local function init(env)
     env.revert_debounce   = cfg_int(config, "revert/debounce_ms", DEFAULTS.debounce_ms,
                                     0, LIMITS.debounce_ms) / 1000
     env.revert_symbols    = make_symbol_set(cfg_string(config, "revert/symbols", DEFAULTS.symbols))
+    env.revert_search_url = cfg_string(config, "revert/search_url", DEFAULTS.search_url)
 
     env.revert_stack = {}
     env.revert_last = nil
@@ -624,11 +702,12 @@ local function init(env)
         end
 
         log.info(string.format(
-            "revert.lua: mode=%s trigger=%s hotkey=%s shortcuts=%s stack_size=%d max_backspaces=%d debounce_ms=%d dll_dir=%s module=%s",
+            "revert.lua: mode=%s trigger=%s hotkey=%s shortcuts=%s search_url=%s stack_size=%d max_backspaces=%d debounce_ms=%d dll_dir=%s module=%s",
             #modes > 0 and table.concat(modes, "+") or "off",
             env.revert_final_code and tostring(env.revert_trigger) or "-",
             hotkey_spec ~= "" and hotkey_spec or "-",
             #codes > 0 and table.concat(codes, ",") or "-",
+            tostring(env.revert_search_url),
             env.revert_stack_size, env.revert_limit,
             math.floor(env.revert_debounce * 1000 + 0.5), env.revert_dll_dir,
             SendKeyCode and "loaded" or "MISSING"))
@@ -675,6 +754,8 @@ local function func(key, env)
                         fire_keys(env, action)
                     elseif action.kind == "symbol" then
                         fire_to_symbol(env, action.include)
+                    elseif action.kind == "search" then
+                        fire_search(env)
                     else
                         fire_delete(env)
                     end

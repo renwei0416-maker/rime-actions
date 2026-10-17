@@ -1,8 +1,9 @@
-"""只读冒烟：正式版 sendKeyCode.dll 里 press_keys / press_backspace 是否真的可用。
+"""只读冒烟：正式版 sendKeyCode.dll 里 press_keys / press_backspace / open_url 是否真的可用。
 
-用法：把编译好的 sendKeyCode.dll 放在仓库根目录（或设环境变量 DLLDIR 指向它的目录）再跑。
-安全：只调用"参数非法"的 press_keys（返回 0、不排队、不注入任何按键），
+安全：只调用"参数非法"的 press_keys / open_url（返回 0、不排队、不注入任何按键、不开浏览器），
 不调用 press_backspace（那会真的发退格），所以不会影响当前桌面。
+
+dll 位置默认是仓库根目录，可用环境变量 DLLDIR 指定（例如指向 backspace-build）。
 """
 import ctypes as C
 import hashlib
@@ -12,8 +13,9 @@ import sys
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RIME = os.environ.get("RIME_DLL", r"C:\Program Files\Rime\weasel-0.17.4\rime.dll")
-DLLDIR = os.environ.get("DLLDIR", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+DLLDIR = os.environ.get("DLLDIR", _ROOT)
 DLL = pathlib.Path(DLLDIR) / "sendKeyCode.dll"
 
 D = C.CDLL(RIME)
@@ -61,8 +63,8 @@ check("module api", lua(
     'package.cpath = [[' + DLLDIR + r'\?.dll]] .. ";" .. package.cpath' "\n"
     'SK = require("sendKeyCode")' "\n"
     'return type(SK.press_keys) .. "/" .. type(SK.press_backspace)'
-    ' .. "/" .. tostring(SK._dry_run_sent)'),
-    "function/function/nil")
+    ' .. "/" .. type(SK.open_url) .. "/" .. tostring(SK._dry_run_sent)'),
+    "function/function/function/nil")
 
 # 参数非法 → 0，且什么都不发。
 # 注意：只有"肯定无效"的 spec 才能放进来——正式版 dll 会真的按键，
@@ -80,6 +82,16 @@ check("press_keys('nonesuch') -> 0", lua('return SK.press_keys("nonesuch")'), "0
 check("press_keys('ctrl+z,+') -> 0", lua('return SK.press_keys("ctrl+z,+")'), "0")
 check("press_keys(300 chars) -> 0",
       lua('return SK.press_keys(string.rep("a", 300))'), "0")
+
+# open_url：只有 http/https 放行；下面这些都是非法地址 → 0，并且不会打开任何东西
+check("open_url('') -> 0", lua('return SK.open_url("")'), "0")
+check("open_url('ftp://x') -> 0", lua('return SK.open_url("ftp://x")'), "0")
+check("open_url('file:///C:/x') -> 0", lua('return SK.open_url("file:///C:/x")'), "0")
+check("open_url('nonesuch') -> 0", lua('return SK.open_url("nonesuch")'), "0")
+check("open_url('https://a b') -> 0", lua('return SK.open_url("https://a b")'), "0")
+check("open_url('https://a|b') -> 0", lua('return SK.open_url("https://a|b")'), "0")
+check("open_url(3000 chars) -> 0",
+      lua('return SK.open_url("https://" .. string.rep("a", 3000))'), "0")
 
 print("RESULT:", "ALL PASS" if not fails else ("FAILED: " + ", ".join(fails)))
 sys.exit(1 if fails else 0)
