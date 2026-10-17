@@ -2,8 +2,8 @@
 """End-to-end check of the scan-code injection using the PRODUCTION dll.
 
 Owns a test window with an EDIT, forces it foreground, then asks the real
-sendKeyCode.dll (loaded through rime.dll's Lua, the same way Rime loads it)
-to send chords, and reads the EDIT selection back:
+<仓库根目录>\\sendKeyCode.dll (loaded through rime.dll's Lua, the same way
+Rime loads it) to send chords, and reads the EDIT selection back:
 
     shift+left       -> caret moves AND one char is selected (21..22)
     shift+home       -> whole line selected (0..22)
@@ -22,7 +22,7 @@ import probe_inject_variants as P
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RIME = os.environ.get("RIME_DLL", r"C:\Program Files\Rime\weasel-0.17.4\rime.dll")
-DLL = os.path.join(_ROOT, "sendKeyCode.dll")
+DLL = os.environ.get("DLL_PATH", os.path.join(_ROOT, "sendKeyCode.dll"))
 
 D = C.CDLL(RIME)
 D.luaL_newstate.restype = C.c_void_p
@@ -69,9 +69,10 @@ print()
 for spec, want_sel in CASES:
     P.clear_pending()
     P.set_text(P.TEXT)
-    P.pump(150)
+    P.pump(300)
     ret = lua('return SK.press_keys([[' + spec + ']])')
-    P.pump(400)
+    # 每个按键之间默认停 30ms，6 个事件的组合键就要 200ms 左右才发完
+    P.pump(700)
     txt = P.get_text()
     s, e = P.get_sel()
     ok = (s, e) == want_sel and ret == "1"

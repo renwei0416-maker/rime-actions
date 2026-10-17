@@ -28,6 +28,9 @@
 - `revert/stack_size`（默认 50）：能连续撤回多少笔；
 - `revert/max_backspaces`（默认 500）：单次最多删多少个字符；
 - `revert/debounce_ms`（默认 200）：连按保护，只对文本触发码生效。
+- `revert/key_gap_ms`（默认 30，范围 0~500）：方式三发按键时，**相邻两个按键之间**停多少毫秒
+  （同一组合键里的修饰键与主键之间、多步动作之间都算）。某个程序反应不过来（只走第一步、
+  Shift 像没按住）就调大，比如 100~200；写 0 就是一口气全发。
 
 ### 方式二：组合键撤回（默认关闭）
 
@@ -80,7 +83,7 @@
 
 1. **拿到 `sendKeyCode.dll`**
    到 [Releases](https://github.com/renwei0416-maker/rime-revert/releases) 下载（v1.1.0 的 `sendKeyCode.dll`
-   是 36190 字节，sha256 `889f98a4955c44dda53f1b6fefcec66acf2747c7301de298eabaf3bc4a7dd89f`），
+   是 36734 字节，sha256 `c1d95fc430dc24abd879777c73430ffad0a13815c9333f33dcf0f558e01c6b2b`），
    或者照 `docs/重新编译说明.md` 自己编一份。
 
 2. **放进 Rime 用户目录**
@@ -132,13 +135,13 @@ python tests\smoke_backspace.py
 ```
 
 需要 Python 3.12、MSYS2 的 mingw64 gcc、以及装好的小狼毫。
-脚本会先现编一份 `-DSENDKEYCODE_DRY_RUN` 的"只记账、不注入"的 dll，然后在 Lua 里跑 174 项断言
+脚本会先现编一份 `-DSENDKEYCODE_DRY_RUN` 的"只记账、不注入"的 dll，然后在 Lua 里跑 182 项断言
 （触发码、记账、去抖、26 项快捷键、多步、删到符号、浏览器搜索、配置校验…）。可用环境变量覆盖路径：
 `MINGW_BIN`、`WEASEL_DIR`、`RIME_DLL`、`DLLDIR`。
 
 > 说明：脚本进程退出时可能返回非 0（`0xC0000005`），那是 dry-run dll 后台线程在进程退出阶段的
 > 已知竞态（`lua_close: clean` 与 `ALL PASS` 都已打印）。以输出里的
-> `CHECKS: 174 asserted, ALL PASS` 为准。
+> `CHECKS: 182 asserted, ALL PASS` 为准。
 
 ## 已测环境与限制
 
@@ -150,8 +153,9 @@ python tests\smoke_backspace.py
   `dd;`（Ctrl+Shift+Backspace）也不是所有程序都表示"删整行"。
 - `f;` 会**真的启动默认浏览器**，搜索词是"最后一次上屏的原文"：之后删过一部分、动过光标，
   搜到的就可能不是你以为的那段；搜索引擎地址由 `revert/search_url` 决定（默认百度）。
-- 多步动作（`hh;`、`ww;`、`tt;`、`gg;`、`aa;`）两步之间约有 30ms 间隔；个别程序对连续组合键
-  不敏感时，偶发只执行了第一步，重按一次即可。
+- 多步动作（`hh;`、`ww;`、`tt;`、`gg;`、`aa;`）与组合键内部的按键之间都有间隔，默认 30ms，
+  由 `revert/key_gap_ms` 控制（0~500）。个别程序对连续按键不敏感时，偶发只执行了第一步，
+  把 `revert/key_gap_ms` 调大（100~200）即可，不用重编。
 - `Ctrl+Shift+←/→` 可能被 Windows 自己的"切换键盘布局"热键抢走（表现为换成别的输入法）：
   到「设置 → 时间和语言 → 输入 → 高级键盘设置 → 输入语言热键」把该项改成**未分配**即可，
   之后用 `Win+Space` 切输入法。

@@ -37,7 +37,7 @@
 动作可以是按键序列（`ctrl+z`、多步 `shift+home,shift+left`）、`@to-symbol`（删到前一个符号、
 符号留在屏幕上）、`@to-symbol-include`（连符号一起删）、`@delete`（等于 `qq/`）。
 默认全不启用（脚本里预置 26 项，写 `"@defaults"` 一次启用；v6 时是 14 项、v6.1 是 17 项）。因此这一版：
-- **要换新 dll**（v6 是 33457 B；v7 是 34203 B；v8 是 36190 B）：C 侧新增 `press_keys(spec)`，返回 1 已排队 / 2 被忽略 / 0 参数非法；
+- **要换新 dll**（v6 是 33457 B；v7 是 34203 B；v8 是 36190 B；v9 是 36734 B）：C 侧新增 `press_keys(spec)`，返回 1 已排队 / 2 被忽略 / 0 参数非法；
   `press_backspace` 没动，所以不用快捷键的话旧 dll 也能跑（只是日志会写 `press_keys is unavailable`）
 - 记账栈从"只记字数"改成"记字数 + 上屏原文"，`@to-symbol` 靠原文往回找符号
 - 三种触发方式互不排斥；快捷键分支不受 `debounce` 限制，但共用 C 侧那个 150 ms 注入窗口
@@ -69,13 +69,29 @@
 - **v8 要换两个文件**：`sendKeyCode.dll`（36190 B）+ `revert.lua`（32444 B）；配置里再加
   `"revert/shortcuts": "@defaults"` 才会启用这 26 项
 
+**v9 的关键改动：按键间隔可配（`revert/key_gap_ms`，默认 30 ms，范围 0~500）。**
+
+- 原来"快慢"是写死的：步与步之间固定 `STEP_GAP_MS 30`，同一步内部的修饰键/主键之间**完全不等**
+  （一次性 `SendInput` 塞进去）。有些编辑器对瞬间到达的一串按键反应不过来（只走第一步、或者
+  Shift/Ctrl 像没按住），所以要能调。
+- C 侧新增 `send_events_spaced(events, total, gap)`：`gap > 0` 时**逐个事件**发
+  （`SendInput(1, ...)`）并在相邻事件之间 `Sleep(gap)`；`gap <= 0` 退回原来"一次塞进去"的写法。
+  `inject_keys(spec, gap)` 每步用它，步与步之间也停 `gap`。
+- `press_keys` 多了**可选第二参数**：`press_keys(spec[, gap_ms])`，省略 = 30；负数当 0，
+  超过 `MAX_KEY_GAP_MS 500` 截到 500。旧版 Lua 只传一个参数也照旧能用。
+- Lua 侧读 `revert/key_gap_ms`，`fire_keys` 把它作为第二个参数传下去；`DEFAULTS.key_gap_ms = 30`、
+  `LIMITS.key_gap_ms = 500`；启动日志多一列 `key_gap_ms=`。
+- dry-run 版新增 `_dry_run_gap()`（返回最后一次解析出来的间隔），供探针断言"配置真的传到了 C"。
+- **v9 也要换两个文件**：`sendKeyCode.dll`（36734 B）+ `revert.lua`；配置里加
+  `"revert/key_gap_ms": 30`（不写就是默认 30，行为与 v8 基本一致，只是同一组合键内部也按 30 ms 逐个发了）。
+
 - 触发方式：默认文本触发码 `qq/`（默认值在 `revert.lua:61` 的 `DEFAULTS`，`trigger` 在 `:62`，可用 `revert/trigger` 覆盖，
   写 `none`/`off`/`-` 即关闭）；可选组合键 `revert/hotkey`（默认空 = 不启用，填了与文本触发码**同时生效**）
 - 行为：触发后向当前窗口注入 N 次退格（`VK_BACK`），N = 上一次上屏的字符数（单次上限
   `revert/max_backspaces`，默认 500）
 - 参数全部可配（默认在 `revert.lua:61` 的 `DEFAULTS`，可用方案 / `custom.yaml` 覆盖，不用重编）：
   `revert/trigger`、`revert/hotkey`、`revert/shortcuts`、`revert/search_url`、`revert/symbols`、
-  `revert/dll_dir`、`revert/stack_size`、`revert/max_backspaces`、`revert/debounce_ms`
+  `revert/dll_dir`、`revert/stack_size`、`revert/max_backspaces`、`revert/debounce_ms`、`revert/key_gap_ms`
 - 模块内部名必须是 `sendKeyCode.dll`，入口 `luaopen_sendKeyCode`
 
 ---
@@ -84,16 +100,16 @@
 
 | 文件 | 大小 | 说明 |
 | --- | --- | --- |
-| `sendKeyCode.dll` | 36190 B | 模块本体，x64。sha256 `889f98a4955c44dda53f1b6fefcec66acf2747c7301de298eabaf3bc4a7dd89f` |
-| `sendKeyCode.c` | 24275 B | 编译用的 C 源（= 你那份 + 函数替换 + 异步注入 + v6 的 `press_keys` + v7 的扫描码注入 + v8 的 `open_url`，diff 见第 2 节）。sha256 `58724062647c0fd84b5f1c8888229c53ddceeb6bc2f67f6bc31aeb84df4a6452` |
-| `revert.lua` | 32444 B | 配套 Lua **processor** 组件（`commit_notifier` 记账 + **三种触发方式可同时启用** + 26 项快捷键动作表 + `-`/`,` 多步 + 删到前一个符号 + `@search` 浏览器搜索 + 可配置参数 + 被忽略时回填记录）。sha256 `dc910107ee670c1f9ca064dd7b75df0a5ae4da21d538a5d50442af6879f901e2` |
+| `sendKeyCode.dll` | 36734 B | 模块本体，x64。sha256 `c1d95fc430dc24abd879777c73430ffad0a13815c9333f33dcf0f558e01c6b2b` |
+| `sendKeyCode.c` | 26895 B | 编译用的 C 源（= 你那份 + 函数替换 + 异步注入 + v6 的 `press_keys` + v7 的扫描码注入 + v8 的 `open_url` + v9 的可配按键间隔，diff 见第 2 节）。sha256 `60f567c752c3818aafd9caff8b5645d8da7d9a8dce92a70e0a0fec00ceee9c54` |
+| `revert.lua` | 33095 B | 配套 Lua **processor** 组件（`commit_notifier` 记账 + **三种触发方式可同时启用** + 26 项快捷键动作表 + `-`/`,` 多步 + 删到前一个符号 + `@search` 浏览器搜索 + **可配按键间隔 `revert/key_gap_ms`** + 可配置参数 + 被忽略时回填记录）。sha256 `88fca3bbc064c17ee5c74e749bbf5caaffcdfd73fdb28c3c7a7e235793122753` |
 | `build.cmd` | 1682 B | 一键构建（ASCII + CRLF，已加 `-lshell32`）。sha256 `26118ccf00e6ddb57770577d7a51620177e83ae3c2543b27692ef54577970c80` |
 | `include\lua.h` / `luaconf.h` / `lauxlib.h` | 16282 / 22044 / 9122 B | Lua 5.4.0 头文件，ABI 基准 |
 | `lib\rime-lua.def` + `lib\librime-lua.a` | 91 / 4672 B | 备选导入库（不想直接链 rime.dll 时用） |
 
-你原始的 `上游原始 sendKeyCode.c` **未改动**
+你原始的 `上游原始的 sendKeyCode.c` **未改动**
 （1139 B，sha256 `EF885BA3A26D3DA08A7FE76071337F9FDA84BB79EE4C0A05CA16D36B018033C9`）。
-上一版 Ctrl+Z 的交付仍在 `（早期 Ctrl+Z 版本，未包含在本仓库）`，未被覆盖。
+上一版 Ctrl+Z 的交付仍在 `..\ctrlz-build\`，未被覆盖。
 
 ---
 
@@ -150,7 +166,7 @@
 
 **头文件**：`lua.h` + `luaconf.h` + `lauxlib.h`（Lua 5.4.0，`LUA_VERSION_NUM 504`）。
 本机 MSYS2 没装 Lua 包，也不存在 `C:\msys64\mingw64\include\lua.h`；这套头文件取自
-`上游 Lua 5.4.0 源码树的 lua\ 目录`（随项目附带的 Lua 5.4.0 原树），已放进 `include\`，编译自足。
+`..\rime-lua-sendKeyCode\lua\`（随项目附带的 Lua 5.4.0 原树），已放进 `include\`，编译自足。
 
 **链接库**：必须解析 5 个 Lua 符号 → 由 **rime.dll** 提供（rime.dll 内嵌 Lua 5.4，725 个具名导出
 里含 154 个 `lua*`/`luaL*`）。实测去掉 `-L… -lrime` 会报
@@ -259,16 +275,16 @@ PE `Time/Date` 显示 1970-01-01）。
    | `press_keys` 返回 2 / 0 | 分别记 `press_keys ignored (previous burst still running or too soon)` / `press_keys refused the sequence: ctrl+z` | ✅ |
    | 同一个环境里三种触发方式同时配 | `mode=text+shortcuts`（含组合键时再加 `hotkey`），`qq/` 与 `z;` 都能用 | ✅ |
 
-   **174 项断言全部 PASS**，`lua_close` 干净（v5 72 项；v6 136 项；v8 再 +38 项）。
+   **182 项断言全部 PASS**，`lua_close` 干净（v5 72 项；v6 136 项；v8 再 +38 项；v9 再 +8 项）。
 
 6. **v7 扫描码修复的验证**（三层，都不碰你的前台窗口）：
 
-   - `tests\probe_press_keys.py`（dry-run dll）：**36 个用例 ALL PASS** —— 12 个组合键 + 18 个裸命名键
+   - `..\probe_press_keys.py`（dry-run dll）：**36 个用例 ALL PASS** —— 12 个组合键 + 18 个裸命名键
      的事件串逐字节核对（`ctrl+shift+left` → `1Ds,2As,4Bsx,4Bsx-up,2As-up,1Ds-up`、`home` → `47sx`、
      `numpad5` → `4Cs`、`escape` → `01s`），6 个非法 spec 仍返回 `0`
-   - `tests\smoke_backspace.py`：**174 项断言仍全部 PASS**（场景 F 只数 `_dry_run_sent`、场景 H 用桩
+   - `..\smoke_backspace.py`：**182 项断言仍全部 PASS**（场景 F 只数 `_dry_run_sent`、场景 H 用桩
      `press_keys` / `open_url` 断言 spec 字符串与 URL，所以事件串格式变化不影响它们）
-   - `tests\probe_scan_e2e.py`：**正式 dll**（用 rime.dll 自带的 Lua 载入）向自建测试窗口真注入：
+   - `..\probe_scan_e2e.py`：**正式 dll**（用 rime.dll 自带的 Lua 载入）向自建测试窗口真注入：
 
      | 用例（`alpha beta gamma delta`，光标在末尾） | 修复前（只填 wVk） | 修复后（扫描码） |
      | --- | --- | --- |
@@ -278,7 +294,7 @@ PE `Time/Date` 显示 1970-01-01）。
      | `left`（对照） | 21..21 | 21..21，不选中 ✅ |
      | `ctrl+backspace`（= `bb;`） | 单行 EDIT 里插入一个字面 DEL | 同样插入 DEL（与旧写法**逐字一致**，不是回归） |
 
-     最后一行只是这个极简 EDIT 控件自己的行为（`tests\probe_ctrl_backspace_cmp.py` 把两种写法对比过，
+     最后一行只是这个极简 EDIT 控件自己的行为（`..\probe_ctrl_backspace_cmp.py` 把两种写法对比过，
      结果相同）；真实编辑器里多半是"删掉前一个词"，请在你自己常用的编辑器里确认 `bb;`。
      另外实验还量到：一次 `SendInput` 全塞 vs 分步 30 ms 发送**没有差别**，起作用的只有"有没有扫描码"。
 
@@ -289,26 +305,26 @@ PE `Time/Date` 显示 1970-01-01）。
 
    > 另外发现一处**仅影响进程退出**的竞态：跑测试的宿主进程若在后台批次还没发完时退出，
    > 偶发 `0xC0000005`（断言早已全过、`lua_close` 也已干净返回）。诊断脚本
-   > `tests\probe_exit_av.py` 复现了它（大批次时有时崩、小批次不崩）；测试里改成"等批次跑完再退出"
+   > `..\probe_exit_av.py` 复现了它（大批次时有时崩、小批次不崩）；测试里改成"等批次跑完再退出"
    > 后连跑 3 次退出码全 0。**同性质的风险在产品侧也存在**：小狼毫退出时若正好在批次中，
    > 卸载竞态也可能触发访问冲突。彻底修法是 C 侧加 `DllMain(DLL_PROCESS_DETACH)` 等待工作线程
    > 结束（本版未做）。
 
 7. **v8（`-` 分步 + `@search`）的验证**：
 
-   - `tests\smoke_backspace.py`：**174 项断言 ALL PASS**（v6 的 136 项全部保留并通过，另加 38 项：
+   - `..\smoke_backspace.py`：**182 项断言 ALL PASS**（v6 的 136 项、v8 的 174 项全部保留并通过，另加 8 项：
      26 个默认触发码逐个核对 spec、`f;` 的 URL 与两种失败日志、`-` 归一化、`revert/search_url`
      换成必应、没上屏就按 `f;` 不发请求）
-   - `tests\probe_prod_dll.py`（正式 dll）：`press_keys` / `press_backspace` / `open_url` 都是 function、
+   - `..\probe_prod_dll.py`（正式 dll）：`press_keys` / `press_backspace` / `open_url` 都是 function、
      没有 dry-run 钩子；7 个非法地址（空串、`ftp://x`、`file:///C:/x`、`nonesuch`、带空格、带 `|`、
      3000 字符）全部返回 `0` → **RESULT: ALL PASS**
-   - `tests\probe_open_url_e2e.py`（正式 dll + 真浏览器）：用 rime.dll 的 Lua 调
+   - `..\probe_open_url_e2e.py`（正式 dll + 真浏览器）：用 rime.dll 的 Lua 调
      `open_url("http://127.0.0.1:8765/probe-open-url.txt")`，本机起一个 `http.server` 当靶子，
      服务端日志出现 `"GET /probe-open-url.txt HTTP/1.1" 200` —— **证明 `ShellExecuteW`
      真的把默认浏览器拉起来了**（测试时弹过一次浏览器标签页，事后已关掉服务）
 
 **未做（重要）**：没有启动小狼毫、没有在 Weasel 里输入过 `qq/`；v7/v8 的"真注入"只发生在本目录
-那几个探针**自己创建的测试窗口**里（`probe_scan_e2e.py` / `probe_inject_variants.py`，注入前会把
+那几个探针**自己创建的测试窗口**里（`tests\probe_scan_e2e.py` / `tests\probe_inject_variants.py`，注入前会把
 自己的窗口抢到前台，读完选区就关掉），**没有往你的任何窗口发过按键**；`open_url` 的真实验证
 也只开了 `127.0.0.1` 上的测试页。真正的删除手感、`ss;`/`ww;`/`f;` 在你常用编辑器里的表现，
 仍必须由你部署后实测。
@@ -319,13 +335,13 @@ PE `Time/Date` 显示 1970-01-01）。
 
 1. **先停服务**：任务栏小狼毫图标右键 → 停止服务（或结束 `WeaselServer.exe`）。
    否则 `sendKeyCode.dll` 正被加载，覆盖会失败（文件占用）。
-2. 覆盖到 `<Rime 用户目录>\lua\<你的目录>\`：
-   - `sendKeyCode.dll` ← 本目录那个（36190 B）
-   - `revert.lua` ← 本目录那个（32444 B）
-   - **v8 两个文件都要换**（`-` 的归一化和 `f;` 属于 Lua 侧，`open_url` 属于 dll 侧；
-     只换 Lua 的话 `f;` 会记 `sendKeyCode.open_url is unavailable`，其余快捷键照旧能用）
+2. 覆盖到 `<Rime 用户目录>\lua\wanxiang\ziji\sendKeyCode\`：
+   - `sendKeyCode.dll` ← 本目录那个（36734 B）
+   - `revert.lua` ← 本目录那个（33095 B）
+   - **v9 两个文件都要换**（可配按键间隔要 dll 认第二个参数、Lua 也要把配置传下去；
+     只换 dll 不换 Lua 的话仍可按 v8 的固定 30 ms 节奏跑，但改 `revert/key_gap_ms` 不会生效）
    - 想让 26 项快捷键生效，配置里要有一行 `"revert/shortcuts": "@defaults"`
-   > 从 v7（34203 B）升上来时：dll 和 Lua 都要换；从 v6（33457 B）或更早升上来也一样。
+   > 从 v8（36190 B）升上来时：dll 和 Lua 都要换；从 v7（34203 B）或更早升上来也一样。
    > 但**千万别**只换 dll 不换 Lua：dll 还是好的，可只要 Lua 还挂在 `translators` 里，崩溃就照旧。
 3. 启动服务并**重新部署**（右键 → 重新部署）。
 
@@ -379,6 +395,7 @@ engine/processors/@after 15: lua_processor@*wanxiang.ziji.sendKeyCode.revert
 | `revert/stack_size` | `50` | 最多能连撤多少次上屏 |
 | `revert/max_backspaces` | `500` | 单次最多删多少字符（超出部分不删，日志记一条） |
 | `revert/debounce_ms` | `200` | 触发按键之间的防抖（毫秒），只对方式一生效 |
+| `revert/key_gap_ms` | `30` | **相邻两个按键之间**停多少毫秒（0~500，v9）；同一组合键内的修饰键/主键之间、多步之间都用它。程序反应不过来就调大（100~200），`0` = 一口气全发 |
 | `sendKeyCode.c:35` | `MAX_BACKSPACES 10000` | dll 侧防呆上限（要超过 10000 才需重编） |
 
 异步注入的固定参数（编在 dll 里，改要重编）：`sendKeyCode.c:38-42` 的 `FIRE_DELAY_MS 80`、
@@ -390,7 +407,8 @@ engine/processors/@after 15: lua_processor@*wanxiang.ziji.sendKeyCode.revert
 | `BATCH_SIZE` | 8 | 每次 `SendInput` 发几个退格 |
 | `BATCH_GAP_MS` | 5 ms | 批与批之间歇多久 |
 | `MIN_INTERVAL_MS` | 150 ms | 距上次注入不足这个时间的请求直接丢弃（返回 0）；`press_backspace` 和 `press_keys` 共用这一个窗口 |
-| `STEP_GAP_MS` | 30 ms | `press_keys` 多步序列里，一步与一步之间等多久（`sendKeyCode.c:65`） |
+| `STEP_GAP_MS` | 30 ms | `press_keys` **默认**的按键间隔：相邻两个按键事件之间、以及多步之间等多久（`sendKeyCode.c:78`；实际值由 `revert/key_gap_ms` 传入） |
+| `MAX_KEY_GAP_MS` | 500 | `press_keys` 第二参数的防呆上限（`:79`） |
 | `MAX_CHORD_EVENTS` | 12 | 一步里最多几个键事件（`sendKeyCode.c:68`） |
 | `MAX_SPEC_LEN` | 255 | `press_keys` 接受的 spec 字符串上限（`sendKeyCode.c:67`） |
 | `MAX_URL_LEN` | 2048 | `open_url` 接受的 URL 上限（v8） |

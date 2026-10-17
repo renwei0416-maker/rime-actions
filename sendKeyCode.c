@@ -3,15 +3,21 @@
  *
  * 对外提供三个函数：
  *   press_backspace(count) —— 请求"删除 count 个字符"
- *   press_keys(spec)       —— 请求"发一串按键组合"
+ *   press_keys(spec[, gap_ms]) —— 请求"发一串按键组合"，gap_ms = 相邻两次按键
+ *                          之间等多少毫秒（省略则 30）
  *   open_url(url)          —— 请求"用默认浏览器打开这个网址"（http/https）
  *
  * press_keys 的 spec 语法（大小写都行，多余空格会被忽略）：
  *   "ctrl+z"                  发一次 Ctrl+Z
- *   "shift+home"              发一次 Shift+Home
+ *   "shift+home"              发一次 Shift/Home
  *   "ctrl+shift+k"            发一次 Ctrl+Shift+K
  *   "ctrl+backspace"          发一次 Ctrl+Backspace（= 删前一个词）
- *   "shift+home,shift+left"   逗号分隔 = 依次发多步（步间停 STEP_GAP_MS 毫秒）
+ *   "shift+home,shift+left"   逗号分隔 = 依次发多步
+ *
+ * 按键节奏（gap_ms，默认 30，范围 0..500）：每发出一个按键事件之后都等这么久
+ * 再发下一个 —— 同一个组合键里的"修饰键→主键→抬起"之间也用这个间隔，多步之间
+ * 同样用它。有些编辑器/程序对瞬间到达的一串按键反应不过来（表现为只走了第一步、
+ * 或者修饰键像没按住），把这个值调大（100~200）通常就好了。
  * 可用的键名：单字母 a-z、单数字 0-9，另有
  *   backspace tab return enter escape esc space pageup pagedown end home
  *   left up right down insert delete del capslock
@@ -69,7 +75,8 @@
 #define BATCH_GAP_MS     5  /* 批与批之间歇多久 */
 #define MIN_INTERVAL_MS 150 /* 距上次注入不足这个时间的新请求直接丢弃 */
 #define WORKER_POLL_MS   5  /* 后台线程轮询待发槽位的间隔 */
-#define STEP_GAP_MS     30  /* 多步按键序列之间歇多久 */
+#define STEP_GAP_MS     30  /* 默认按键间隔：相邻两个按键事件之间歇多久 */
+#define MAX_KEY_GAP_MS 500  /* 按键间隔的防呆上限（毫秒） */
 
 #define MAX_SPEC_LEN   255  /* press_keys 的 spec 最长字符数 */
 #define MAX_CHORD_EVENTS 12 /* 单步组合键最多产生的事件数（4 修饰 + 键按下抬起 + 4 修饰释放）*/
@@ -80,6 +87,7 @@ static volatile LONG      g_pending_kind  = 0;  /* 0=空闲 1=退格 2=组合键
 static volatile LONG      g_pending_count = 0;  /* kind==1 时要发几个退格 */
 static char               g_pending_spec[MAX_SPEC_LEN + 1]; /* kind==2 时的按键串 */
 static char               g_pending_url[MAX_URL_LEN + 1];   /* kind==3 时的网址 */
+static volatile LONG      g_pending_gap   = STEP_GAP_MS;     /* kind==2 时相邻按键的间隔（毫秒） */
 static volatile LONG      g_busy       = 0;
 static volatile ULONGLONG g_last_start = 0;
 static PVOID              g_worker     = NULL;
@@ -94,6 +102,8 @@ static volatile LONG g_dry_run_events = 0;
 /* 打开的网址也只记录、不真开 */
 static volatile LONG g_dry_run_url_opens = 0;
 static char          g_dry_run_url_text[MAX_URL_LEN + 1];
+/* 最后一次 press_keys 用的按键间隔，供自测断言（dry-run 不真的等） */
+static volatile LONG g_dry_run_gap = STEP_GAP_MS;
 #endif
 
 /* 把一批按键发出去，返回成功发出的按键个数 */
@@ -121,6 +131,31 @@ static UINT send_batch(INPUT *events, UINT total)
     return total;
 #else
     return SendInput(total, events, sizeof(INPUT));
+#endif
+}
+
+/* 按指定节奏发一批按键：每发一个事件等 gap 毫秒再发下一个。
+ * gap <= 0 时退回"一次塞进去"的老写法（最快，但有些程序反应不过来）。 */
+static UINT send_events_spaced(INPUT *events, UINT total, int gap)
+{
+    UINT i;
+    UINT sent = 0;
+
+    if (gap <= 0 || total == 0)
+        return send_batch(events, total);
+
+#ifdef SENDKEYCODE_DRY_RUN
+    /* 自测版只记录事件、不真的等，否则一次触发要跑好几秒 */
+    return send_batch(events, total);
+#else
+    for (i = 0; i < total; i++) {
+        if (SendInput(1, &events[i], sizeof(INPUT)) != 1)
+            break;
+        sent++;
+        if (i + 1 < total)
+            Sleep((DWORD)gap);
+    }
+    return sent;
 #endif
 }
 
@@ -382,8 +417,9 @@ static BOOL spec_is_valid(const char *spec)
     return TRUE;
 }
 
-/* 发一串按键（逗号分隔多步），返回成功发出的步数 */
-static int inject_keys(const char *spec)
+/* 发一串按键（逗号分隔多步），返回成功发出的步数。
+ * gap = 相邻按键事件之间的间隔（毫秒） */
+static int inject_keys(const char *spec, int gap)
 {
     const char *p = spec;
     int steps = 0;
@@ -398,13 +434,15 @@ static int inject_keys(const char *spec)
         n = len ? build_chord(p, len, ev) : 0;
         if (n == 0)
             break;  /* 解析失败就停手，剩下的不发 */
-        if (send_batch(ev, n) != n)
+        if (send_events_spaced(ev, n, gap) != n)
             break;
 
         steps++;
         if (!comma)
             break;
-        Sleep(STEP_GAP_MS);
+        /* 步与步之间也按同一个节奏停一下 */
+        if (gap > 0)
+            Sleep((DWORD)gap);
         p = comma + 1;
     }
     return steps;
@@ -491,7 +529,7 @@ static DWORD WINAPI worker_main(LPVOID param)
             if (kind == 1)
                 inject_backspaces((int)count);
             else if (kind == 2)
-                inject_keys(g_pending_spec);
+                inject_keys(g_pending_spec, (int)InterlockedExchange(&g_pending_gap, STEP_GAP_MS));
             else if (kind == 3)
                 open_url_now(g_pending_url);
             InterlockedExchange(&g_busy, 0);
@@ -575,6 +613,8 @@ static int l_press_keys(lua_State *L)
 {
     size_t len = 0;
     const char *spec = luaL_checklstring(L, 1, &len);
+    lua_Integer gap_arg = luaL_optinteger(L, 2, STEP_GAP_MS);
+    int gap;
 
     if (len == 0 || len > MAX_SPEC_LEN) {
         lua_pushinteger(L, 0);
@@ -586,6 +626,18 @@ static int l_press_keys(lua_State *L)
         return 1;
     }
 
+    /* 间隔防呆：负数当 0，太大截到 MAX_KEY_GAP_MS */
+    if (gap_arg < 0)
+        gap_arg = 0;
+    if (gap_arg > MAX_KEY_GAP_MS)
+        gap_arg = MAX_KEY_GAP_MS;
+    gap = (int)gap_arg;
+
+#ifdef SENDKEYCODE_DRY_RUN
+    /* 自测用：无论这次是否被忽略，都记下解析出来的间隔 */
+    InterlockedExchange(&g_dry_run_gap, (LONG)gap);
+#endif
+
     if (!claim_slot()) {
         /* 2 = 被忽略：上一个请求还在发，或距上次注入太近（不是参数问题） */
         lua_pushinteger(L, 2);
@@ -593,7 +645,7 @@ static int l_press_keys(lua_State *L)
     }
 
     if (!ensure_worker()) {
-        int steps = inject_keys(spec);
+        int steps = inject_keys(spec, gap);
         InterlockedExchange(&g_busy, 0);
         lua_pushinteger(L, steps > 0 ? 1 : 0);
         return 1;
@@ -602,6 +654,7 @@ static int l_press_keys(lua_State *L)
     /* 先填槽位再发布 kind：后台线程只在 kind 非 0 时才读它 */
     memcpy(g_pending_spec, spec, len);
     g_pending_spec[len] = '\0';
+    InterlockedExchange(&g_pending_gap, (LONG)gap);
     InterlockedExchange(&g_pending_count, 1);
     InterlockedExchange(&g_pending_kind, 2);
     lua_pushinteger(L, 1);
@@ -677,6 +730,7 @@ static int l_dry_run_reset(lua_State *L)
     InterlockedExchange(&g_dry_run_events, 0);
     InterlockedExchange(&g_dry_run_url_opens, 0);
     g_dry_run_url_text[0] = '\0';
+    InterlockedExchange(&g_dry_run_gap, STEP_GAP_MS);
     return 0;
 }
 
@@ -713,6 +767,12 @@ static int l_dry_run_url(lua_State *L)
     lua_pushstring(L, g_dry_run_url_text);
     return 1;
 }
+/* 只有自测 dll 才有：返回最后一次 press_keys 用的按键间隔（毫秒） */
+static int l_dry_run_gap(lua_State *L)
+{
+    lua_pushinteger(L, (lua_Integer)g_dry_run_gap);
+    return 1;
+}
 #endif
 
 static const luaL_Reg module_functions[] = {
@@ -725,6 +785,7 @@ static const luaL_Reg module_functions[] = {
     {"_dry_run_events", l_dry_run_events},
     {"_dry_run_url_opens", l_dry_run_url_opens},
     {"_dry_run_url",       l_dry_run_url},
+    {"_dry_run_gap",       l_dry_run_gap},
 #endif
     {NULL, NULL}
 };

@@ -9,9 +9,9 @@ import time
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-RIME = os.environ.get("RIME_DLL", r"C:\Program Files\Rime\weasel-0.17.4\rime.dll")
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DRYDIR = os.path.join(_ROOT, "_testdata", "dryrun")
+RIME = os.environ.get("RIME_DLL", r"C:\Program Files\Rime\weasel-0.17.4\rime.dll")
+DRYDIR = os.environ.get("DRYDIR", os.path.join(_ROOT, "_testdata", "dryrun"))
 
 D = C.CDLL(RIME)
 D.luaL_newstate.restype = C.c_void_p
@@ -105,6 +105,19 @@ for spec in INVALID:
     print(("  OK   " if ok else "  FAIL ") + "%-24s -> %s (期望被拒绝)" % (repr(spec), got))
     if not ok:
         fails.append((spec, "0|", got))
+
+# 按键间隔（第二个参数）: 省略 = 30，显式值原样传给 C，超上限截到 500
+GAPS = [(None, 30), (0, 0), (120, 120), (5000, 500), (-5, 0)]
+for gap, want in GAPS:
+    call = ("M.press_keys([[ctrl+z]])" if gap is None
+            else "M.press_keys([[ctrl+z]], %d)" % gap)
+    lua("M._dry_run_reset(); R = " + call)
+    time.sleep(0.25)
+    got = lua("return tostring(M._dry_run_gap())")
+    ok = got == str(want)
+    print(("  OK   " if ok else "  FAIL ") + "gap %-6s -> %s (期望 %d)" % (gap, got, want))
+    if not ok:
+        fails.append(("gap", want, got))
 
 print("lua_close: 结束")
 D.lua_close(L)

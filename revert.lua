@@ -36,13 +36,14 @@
 --     "revert/stack_size": 50                             # 可连续撤回次数
 --     "revert/max_backspaces": 500                        # 单次最多删多少字符
 --     "revert/debounce_ms": 200                           # 连按保护（毫秒），只对文本触发码生效
+--     "revert/key_gap_ms": 30                             # 相邻两个按键之间等多少毫秒（0..500）
 --
 -- revert/shortcuts 的写法：每项 "触发码=动作"，用空格/换行隔开。
 --   动作有五种：
 --     按键序列            例如 "ctrl+z"、"shift+home"
 --     ～多步用 - 或 ,～     例如 "shift+home-ctrl+c"、"shift+home,ctrl+c"
 --                         （先发完第一步、把按键全部抬起，再发下一步；
---                           两步之间 dll 会停 STEP_GAP_MS=30 毫秒）
+--                           相邻两个按键之间都按 revert/key_gap_ms 停顿，默认 30 毫秒）
 --     @to-symbol          删到前一个符号，保留符号
 --     @to-symbol-include  删到前一个符号，连符号一起删
 --     @delete             同文本触发码：删掉最近一笔上屏
@@ -68,14 +69,17 @@ local DEFAULTS = {
     stack_size     = 50,
     max_backspaces = 500,
     debounce_ms    = 200,
+    key_gap_ms     = 30,
 }
 
 -- 安全上限：只用来挡住异常大的配置值，正常使用碰不到。
--- max_backspaces 不要超过 sendKeyCode.c 里的 MAX_BACKSPACES（当前 10000）。
+-- max_backspaces 不要超过 sendKeyCode.c 里的 MAX_BACKSPACES（当前 10000）；
+-- key_gap_ms 不要超过 sendKeyCode.c 里的 MAX_KEY_GAP_MS（当前 500）。
 local LIMITS = {
     stack_size     = 1000,
     max_backspaces = 10000,
     debounce_ms    = 10000,
+    key_gap_ms     = 500,
 }
 
 -- 把 revert/trigger 写成下面任一个值 = 关掉文本触发（只留组合键 / 快捷键）
@@ -568,7 +572,9 @@ local function fire_keys(env, action)
         return
     end
 
-    local ok, result = pcall(SendKeyCode.press_keys, action.spec)
+    -- 按键节奏：相邻两个按键之间等多少毫秒（旧版 dll 会忽略这个参数）
+    local gap = env.revert_key_gap or DEFAULTS.key_gap_ms
+    local ok, result = pcall(SendKeyCode.press_keys, action.spec, gap)
     if not ok then
         if log and log.error then
             log.error("revert.lua: press_keys failed: " .. tostring(result))
@@ -657,6 +663,8 @@ local function init(env)
                                     0, LIMITS.debounce_ms) / 1000
     env.revert_symbols    = make_symbol_set(cfg_string(config, "revert/symbols", DEFAULTS.symbols))
     env.revert_search_url = cfg_string(config, "revert/search_url", DEFAULTS.search_url)
+    env.revert_key_gap    = cfg_int(config, "revert/key_gap_ms", DEFAULTS.key_gap_ms,
+                                    0, LIMITS.key_gap_ms)
 
     env.revert_stack = {}
     env.revert_last = nil
@@ -702,12 +710,13 @@ local function init(env)
         end
 
         log.info(string.format(
-            "revert.lua: mode=%s trigger=%s hotkey=%s shortcuts=%s search_url=%s stack_size=%d max_backspaces=%d debounce_ms=%d dll_dir=%s module=%s",
+            "revert.lua: mode=%s trigger=%s hotkey=%s shortcuts=%s search_url=%s key_gap_ms=%d stack_size=%d max_backspaces=%d debounce_ms=%d dll_dir=%s module=%s",
             #modes > 0 and table.concat(modes, "+") or "off",
             env.revert_final_code and tostring(env.revert_trigger) or "-",
             hotkey_spec ~= "" and hotkey_spec or "-",
             #codes > 0 and table.concat(codes, ",") or "-",
             tostring(env.revert_search_url),
+            env.revert_key_gap or DEFAULTS.key_gap_ms,
             env.revert_stack_size, env.revert_limit,
             math.floor(env.revert_debounce * 1000 + 0.5), env.revert_dll_dir,
             SendKeyCode and "loaded" or "MISSING"))

@@ -40,6 +40,8 @@ patch:
 
   # ---------- 6. @search 用的搜索引擎（f; 就是它）----------
   # 模板里的 %s 会被替换成"最后一次上屏"的原文（已做 percent-encode）；没有 %s 时直接接在末尾。
+  # 方式三按键之间的间隔（毫秒，0~500）。程序反应不过来就调大，写 0 = 一口气全发。
+  "revert/key_gap_ms": 30
   "revert/search_url": "https://www.baidu.com/s?wd=%s"
   #"revert/search_url": "https://www.bing.com/search?q=%s"
   #"revert/search_url": "https://www.google.com/search?q=%s"

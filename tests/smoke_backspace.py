@@ -44,7 +44,8 @@ import sys
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+BASE = os.environ.get("REVERT_ROOT", os.path.dirname(_HERE))
 MINGW_BIN = os.environ.get("MINGW_BIN", r"C:\msys64\mingw64\bin")
 WEASEL_DIR = os.environ.get("WEASEL_DIR", r"C:\Program Files\Rime\weasel-0.17.4")
 
@@ -82,11 +83,12 @@ def build_dry_run_dll():
 def prepare_fake_userdir():
     os.makedirs(DLL_DIR, exist_ok=True)
     src = os.path.join(BASE, "sendKeyCode.dll")
-    if not os.path.isfile(src):
-        # 仓库里不带二进制：用刚编出来的 dry-run dll 顶上（场景 E 会读到它，
-        # 但 E 只验"配置写错时的日志"，不真发键，所以用哪份 dll 都一样）
+    if not os.path.exists(src):
+        # 这个仓库不随源码放二进制：用刚编出来的 dry-run dll 顶替。
+        # 场景 E 只用它试"dll_dir 写错时能否优雅失败"，不真的发键，够用。
         src = os.path.join(DLL_DIR_DRY, "sendKeyCode.dll")
-        print("note: no production sendKeyCode.dll in repo root, using the dry-run build for scenario E")
+        print("note: no production sendKeyCode.dll in repo root,"
+              " using the dry-run build for scenario E")
     shutil.copy2(src, os.path.join(DLL_DIR, "sendKeyCode.dll"))
 
 
@@ -413,8 +415,13 @@ local function cfg_plain(values)
 end
 
 local keysent = {}
+local keysent_gap = {}
 local keyret = 1
-mod.press_keys = function(spec) keysent[#keysent + 1] = spec return keyret end
+mod.press_keys = function(spec, gap)
+  keysent[#keysent + 1] = spec
+  keysent_gap[#keysent_gap + 1] = gap
+  return keyret
+end
 
 local urlsent = {}
 local urlret = 1
@@ -448,8 +455,12 @@ rec("H_default_table", #revert.default_shortcuts)
 -- 每个默认触发码 -> 本来会发出去的那串按键
 local function h_try(tag, s)
   keysent = {}
+  keysent_gap = {}
   rec(tag .. "_ret", type_text(revert, envH, ctxH, s))
   rec(tag .. "_spec", table.concat(keysent, "|"))
+  if tag == "H_z" then
+    rec("H_gap_default", tostring(keysent_gap[1]))
+  end
 end
 h_try("H_z",  "z;")
 h_try("H_y",  "y;")
@@ -659,6 +670,41 @@ rec("H7_search_url", "[" .. table.concat(urlsent, "|") .. "]")
 rec("H7_search_log", tostring(log_has("nothing to search")))
 revert.fini(envH6)
 revert.fini(envH7)
+
+-- H8: 按键间隔 revert/key_gap_ms（默认 30；可配；超上限截到 500）
+logs = {}
+local cfgH8 = cfg_plain({
+  ["revert/shortcuts"]   = "z;=ctrl+z  hh;=shift+home-ctrl+c",
+  ["revert/key_gap_ms"]  = 120,
+  ["revert/dll_dir"]     = DLLREL,
+  ["revert/debounce_ms"] = 0,
+})
+local envH8, ctxH8 = new_env(cfgH8)
+revert.init(envH8)
+rec("H8_log_gap", tostring(last_log():match("key_gap_ms=(%d+)")))
+keysent, keysent_gap = {}, {}
+rec("H8_ret", type_text(revert, envH8, ctxH8, "z;"))
+rec("H8_gap", tostring(keysent_gap[1]))
+keysent, keysent_gap = {}, {}
+type_text(revert, envH8, ctxH8, "hh;")
+rec("H8_multi_spec", table.concat(keysent, "|"))
+rec("H8_multi_gap", tostring(keysent_gap[1]))
+revert.fini(envH8)
+
+logs = {}
+local cfgH8b = cfg_plain({
+  ["revert/shortcuts"]   = "z;=ctrl+z",
+  ["revert/key_gap_ms"]  = 5000,
+  ["revert/dll_dir"]     = DLLREL,
+  ["revert/debounce_ms"] = 0,
+})
+local envH8b, ctxH8b = new_env(cfgH8b)
+revert.init(envH8b)
+rec("H8b_log_gap", tostring(last_log():match("key_gap_ms=(%d+)")))
+keysent, keysent_gap = {}, {}
+type_text(revert, envH8b, ctxH8b, "z;")
+rec("H8b_gap_capped", tostring(keysent_gap[1]))
+revert.fini(envH8b)
 
 -- =====================================================================
 -- E. config: wrong dll_dir -> graceful failure, nothing injected
@@ -986,6 +1032,15 @@ def main():
         "H7_search_ret": "2,1",
         "H7_search_url": "[]",
         "H7_search_log": "true",
+        # H8: key gap
+        "H_gap_default": "30",
+        "H8_log_gap": "120",
+        "H8_ret": "2,1",
+        "H8_gap": "120",
+        "H8_multi_spec": "shift+home,ctrl+c",
+        "H8_multi_gap": "120",
+        "H8b_log_gap": "500",
+        "H8b_gap_capped": "500",
         # E: broken dll_dir
         "E_good_entry_removed": "true",
         "E_cpath_clean": "true",
