@@ -33,6 +33,7 @@
 --     "revert/shortcuts": "zz;=ctrl+z yy;=ctrl+y"         # 快捷键表；不填=全不启用
 --     "revert/symbols": "，。！？；：、,.!?;:"              # @to-symbol 认定的"符号"
 --     "revert/dll_dir": "lua/wanxiang/ziji/sendKeyCode"   # dll 所在目录（相对 <Rime 用户目录>）
+--     "revert/search_url": "https://www.baidu.com/s?wd=%s"   #设置默认用于搜索的搜索引擎
 --     "revert/stack_size": 50                             # 可连续撤回次数
 --     "revert/max_backspaces": 500                        # 单次最多删多少字符
 --     "revert/debounce_ms": 200                           # 连按保护（毫秒），只对文本触发码生效
@@ -106,7 +107,7 @@ local DEFAULT_SHORTCUTS = {
     { "d;",  "delete" },                  -- 删除（Del）
     { "kk;", "ctrl+shift+k" },            -- 删除整行（VS Code 等）
     { "aa;", "ctrl+a-ctrl+c" },           -- 复制全文
-    { "dd;", "ctrl+shift+backspace" },    -- 按你给的表保留（并非所有程序都是"删整行"）
+    { "dd;", "ctrl+shift+backspace" },    -- 删整行（并非所有程序都是"删整行"）
     { "ww;", "ctrl+shift+left-ctrl+c" },  -- 复制前一个词
     { "hh;", "shift+home-ctrl+c" },       -- 复制整行
     { "tt;", "ctrl+shift+home-ctrl+c" },  -- 复制光标之上所有内容

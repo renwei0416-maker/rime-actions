@@ -102,7 +102,7 @@
 | --- | --- | --- |
 | `sendKeyCode.dll` | 36734 B | 模块本体，x64。sha256 `c1d95fc430dc24abd879777c73430ffad0a13815c9333f33dcf0f558e01c6b2b` |
 | `sendKeyCode.c` | 26895 B | 编译用的 C 源（= 你那份 + 函数替换 + 异步注入 + v6 的 `press_keys` + v7 的扫描码注入 + v8 的 `open_url` + v9 的可配按键间隔，diff 见第 2 节）。sha256 `60f567c752c3818aafd9caff8b5645d8da7d9a8dce92a70e0a0fec00ceee9c54` |
-| `revert.lua` | 33095 B | 配套 Lua **processor** 组件（`commit_notifier` 记账 + **三种触发方式可同时启用** + 26 项快捷键动作表 + `-`/`,` 多步 + 删到前一个符号 + `@search` 浏览器搜索 + **可配按键间隔 `revert/key_gap_ms`** + 可配置参数 + 被忽略时回填记录）。sha256 `88fca3bbc064c17ee5c74e749bbf5caaffcdfd73fdb28c3c7a7e235793122753` |
+| `revert.lua` | 33186 B | 配套 Lua **processor** 组件（`commit_notifier` 记账 + **三种触发方式可同时启用** + 26 项快捷键动作表 + `-`/`,` 多步 + 删到前一个符号 + `@search` 浏览器搜索 + **可配按键间隔 `revert/key_gap_ms`** + 可配置参数 + 被忽略时回填记录）。sha256 `d05edf7fdc8d5697b858d144f337acd8287e586863ff359a8782edb32d370a18` |
 | `build.cmd` | 1682 B | 一键构建（ASCII + CRLF，已加 `-lshell32`）。sha256 `26118ccf00e6ddb57770577d7a51620177e83ae3c2543b27692ef54577970c80` |
 | `include\lua.h` / `luaconf.h` / `lauxlib.h` | 16282 / 22044 / 9122 B | Lua 5.4.0 头文件，ABI 基准 |
 | `lib\rime-lua.def` + `lib\librime-lua.a` | 91 / 4672 B | 备选导入库（不想直接链 rime.dll 时用） |
@@ -337,7 +337,7 @@ PE `Time/Date` 显示 1970-01-01）。
    否则 `sendKeyCode.dll` 正被加载，覆盖会失败（文件占用）。
 2. 覆盖到 `<Rime 用户目录>\lua\wanxiang\ziji\sendKeyCode\`：
    - `sendKeyCode.dll` ← 本目录那个（36734 B）
-   - `revert.lua` ← 本目录那个（33095 B）
+   - `revert.lua` ← 本目录那个（33186 B）
    - **v9 两个文件都要换**（可配按键间隔要 dll 认第二个参数、Lua 也要把配置传下去；
      只换 dll 不换 Lua 的话仍可按 v8 的固定 30 ms 节奏跑，但改 `revert/key_gap_ms` 不会生效）
    - 想让 26 项快捷键生效，配置里要有一行 `"revert/shortcuts": "@defaults"`
