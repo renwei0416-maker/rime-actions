@@ -82,8 +82,9 @@
 ## 安装
 
 1. **拿到 `sendKeyCode.dll`**
-   到 [Releases](https://github.com/renwei0416-maker/rime-revert/releases) 下载（v1.1.0 的 `sendKeyCode.dll`
-   是 36734 字节，sha256 `c1d95fc430dc24abd879777c73430ffad0a13815c9333f33dcf0f558e01c6b2b`），
+   到 [Releases](https://github.com/renwei0416-maker/rime-revert/releases) 下载（v1.1.2 的 `sendKeyCode.dll`
+   是 36734 字节、sha256 `c1d95fc430dc24abd879777c73430ffad0a13815c9333f33dcf0f558e01c6b2b`；
+   同页的 `revert.lua` 是 33186 字节、sha256 `d05edf7fdc8d5697b858d144f337acd8287e586863ff359a8782edb32d370a18`），
    或者照 `docs/重新编译说明.md` 自己编一份。
 
 2. **放进 Rime 用户目录**
