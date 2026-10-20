@@ -317,7 +317,7 @@ PE `Time/Date` 显示 1970-01-01）。
    | `press_keys` 返回 2 / 0 | 分别记 `press_keys ignored (previous burst still running or too soon)` / `press_keys refused the sequence: ctrl+z` | ✅ |
    | 同一个环境里三种触发方式同时配 | `mode=text+shortcuts`（含组合键时再加 `hotkey`），`qq/` 与 `z;` 都能用 | ✅ |
 
-   **259 项断言全部 PASS**，`lua_close` 干净（v5 72 项；v6 136 项；v8 再 +38 项；v9 再 +8 项；v10 场景 I 再 +61 项 + `replace` 再 +3 项 + 发送键放行再 +9 项；
+   **265 项断言全部 PASS**，`lua_close` 干净（v5 72 项；v6 136 项；v8 再 +38 项；v9 再 +8 项；v10 场景 I 再 +61 项 + `replace` 再 +3 项 + 发送键放行再 +9 项 + 重复请求修复再 +6 项（I16）；
    v10 的场景 I 再 +65 项）。
 
    v10 新增的场景 I（AI 模式，12 组 61 条）覆盖：总开关关着时 `ai;` 不生效（`ai=off` +

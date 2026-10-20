@@ -487,7 +487,15 @@ local function on_commit(text, env)
     local stack = env.revert_stack
     if not stack then return end
 
-    stack[#stack + 1] = { n = length, text = text }
+    -- 结果打进光标的那些字会一个个重新变成"上屏"，标成 ai，免得当成用户自己打的
+    local own = nil
+    if env.ai_last_text and env.ai_typing_until
+        and os.clock() <= env.ai_typing_until + 2
+        and env.ai_last_text:find(text, 1, true) then
+        own = true
+    end
+
+    stack[#stack + 1] = { n = length, text = text, ai = own }
     trim_stack(env)
 end
 
@@ -1017,6 +1025,14 @@ local function ai_send_now(env)
         return
     end
 
+    -- 要发的就是刚打进去的那段结果：这是自己喂自己，不发
+    if env.ai_last_text and text == ai_trim(env.ai_last_text) then
+        if log and log.info then
+            log.info("actions.lua: ai: nothing to send (same as the last answer)")
+        end
+        return
+    end
+
     -- 输入框里的内容已经"发走"了，不再留在屏幕上
     if source == "composition" and composing then ctx:clear() end
 
@@ -1077,6 +1093,7 @@ local function ai_send_now(env)
             utf8.len(text) or #text, prompt, source))
     end
     if env.ai_nudge and Actions.nudge then
+        env.ai_nudged = os.clock()
         Actions.nudge(env.ai_nudge_interval or DEFAULTS.ai_nudge_interval, env.ai_nudge_key)
     end
 end
@@ -1086,7 +1103,7 @@ local function ai_take(env)
     local req = env.ai_req
     if not req or not Actions or not Actions.http_state then return false end
 
-    local ok, state = pcall(Actions.http_state)
+    local ok, state, seq = pcall(Actions.http_state)
     if not ok then return false end
 
     if state == "running" then
@@ -1105,6 +1122,15 @@ local function ai_take(env)
     if state == "idle" then
         env.ai_req = nil
         return false
+    end
+
+    -- 同一个请求序号只取一次；状态万一没复位，也不会把同一份结果再打一遍
+    if type(seq) == "number" then
+        if env.ai_done_seq == seq then
+            env.ai_req = nil
+            return false
+        end
+        env.ai_done_seq = seq
     end
 
     local got, body, err = pcall(Actions.http_result)
@@ -1139,6 +1165,13 @@ local function ai_take(env)
 
     local length = utf8.len(content) or 0
     if length > 0 then push_back(env, { n = length, text = content, ai = true }) end
+
+    -- 刚打进去的字会一个个重新经过输入法：在这个窗口里把它们当普通正文放过去，
+    -- 不要当成触发码/发送键（正文里有 / 或者 ; 时会被自己触发）
+    env.ai_last_text = content
+    env.ai_typing_until = os.clock() + 0.25 + 0.002 * math.max(#content, 1) + 0.5
+    env.ai_last_push = nil
+
     if log and log.info then
         log.info(string.format("actions.lua: ai: inserted %d chars", length))
     end
@@ -1175,15 +1208,36 @@ local function ai_handle_key(key, env)
     -- 唤醒键：把结果取回来；还在等就再约一次
     if kc == env.ai_nudge_key then
         ai_take(env)
-        if env.ai_req and env.ai_nudge and Actions.nudge then
-            Actions.nudge(env.ai_nudge_interval or DEFAULTS.ai_nudge_interval, env.ai_nudge_key)
+        -- 续约：一次唤醒最多排一次，且只按"按下"排。抬起事件也走到这里，
+        -- 如果两边都排，唤醒键的个数每轮翻一倍。
+        if env.ai_req and env.ai_nudge and Actions.nudge and not key:release() then
+            local now = os.clock()
+            local interval = (env.ai_nudge_interval or DEFAULTS.ai_nudge_interval) / 1000
+            if not env.ai_nudged or (now - env.ai_nudged) >= interval * 0.9 then
+                env.ai_nudged = now
+                Actions.nudge(env.ai_nudge_interval or DEFAULTS.ai_nudge_interval, env.ai_nudge_key)
+            end
         end
         return kAccepted
     end
 
     if key:release() then return nil end
 
-    if env.ai_req then ai_take(env) end
+    -- 刚把结果打进光标：这些字符正一个个经过输入法，别当触发码/发送键用
+    if env.ai_typing_until then
+        if os.clock() < env.ai_typing_until then
+            return kNoop
+        end
+        env.ai_typing_until = nil
+    end
+
+    if env.ai_req and ai_take(env) then
+        -- 取回结果的那一下不算"连按发送的第一下"：否则接下来的 / 会立刻再发一条
+        env.ai_last_push = nil
+        if env.ai_send and not env.ai_send.combo and kc == env.ai_send.code then
+            return kAccepted
+        end
+    end
 
     -- 中间按了别的键，就不算"连按两下发送"了
     if env.ai_last_push and not (env.ai_send and kc == env.ai_send.code

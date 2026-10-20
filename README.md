@@ -75,13 +75,13 @@ python tests\smoke_backspace.py
 ```
 
 需要 Python 3.12、MSYS2 mingw64 gcc、装好的小狼毫。脚本先现编一份 `-DACTIONS_DRY_RUN`
-的"只记账、不注入"的 dll，再跑 259 项断言（触发码、记账、去抖、26 项快捷键、多步、
+的"只记账、不注入"的 dll，再跑 265 项断言（触发码、记账、去抖、26 项快捷键、多步、
 删到符号、浏览器搜索、AI、配置校验）。路径可用环境变量覆盖：
 `MINGW_BIN`、`WEASEL_DIR`、`RIME_DLL`、`DLLDIR`。
 
 > 脚本进程退出时可能返回 `0xC0000005`，那是 dry-run dll 后台线程在进程退出阶段的已知竞态
 > （`lua_close: clean` 与 `ALL PASS` 都已打印）。以输出里的
-> `CHECKS: 259 asserted, ALL PASS` 为准。
+> `CHECKS: 265 asserted, ALL PASS` 为准。
 
 ## 限制
 

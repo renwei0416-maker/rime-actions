@@ -44,9 +44,24 @@ import sys
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-BASE = r"C:\Users\Administrator\Desktop\Ai_Work\DSH_harness\backspace-build"
-MINGW_BIN = r"C:\msys64\mingw64\bin"
-WEASEL_DIR = r"C:\Program Files\Rime\weasel-0.17.4"
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _pick_base():
+    """源码目录：本目录（仓库根）或本目录下的 backspace-build（本地工作区）。"""
+    forced = os.environ.get("ACTIONS_BASE")
+    if forced:
+        return forced
+    for cand in (_HERE, os.path.join(_HERE, "backspace-build"),
+                 os.path.dirname(_HERE)):
+        if os.path.isfile(os.path.join(cand, "actions.c")):
+            return cand
+    return _HERE
+
+
+BASE = _pick_base()
+MINGW_BIN = os.environ.get("MINGW_BIN", r"C:\msys64\mingw64\bin")
+WEASEL_DIR = os.environ.get("WEASEL_DIR", r"C:\Program Files\Rime\weasel-0.17.4")
 
 # Optional argv[1]: path of any other rime.dll, to test whether an upgraded
 # Rime still provides the Lua 5.4 ABI this module was built against.
@@ -80,9 +95,12 @@ def build_dry_run_dll():
 
 
 def prepare_fake_userdir():
+    """正式 dll 不在仓库里时，用刚编出来的 dry-run dll 顶上（断言一样能跑）。"""
     os.makedirs(DLL_DIR, exist_ok=True)
-    shutil.copy2(os.path.join(BASE, "actions.dll"),
-                 os.path.join(DLL_DIR, "actions.dll"))
+    src = os.path.join(BASE, "actions.dll")
+    if not os.path.isfile(src):
+        src = os.path.join(DLL_DIR_DRY, "actions.dll")
+    shutil.copy2(src, os.path.join(DLL_DIR, "actions.dll"))
 
 
 LUA_SRC = r"""
@@ -811,6 +829,7 @@ result_body = '{"choices":[{"message":{"content":"\u{6211}\u{51fa}\u{95e8}\u{4e8
 sends, nudges, injected = {}, {}, {}
 local stack_before = #envI.revert_stack
 rec("I2_take_ret", tostring(feed(revert, envI, ctxI, key(0x87))))
+envI.ai_typing_until = nil   -- 测试里跳过“结果正在打字”窗口
 rec("I2_send_text", table.concat(sends, "|"))
 rec("I2_stack_delta", tostring(#envI.revert_stack - stack_before))
 rec("I2_stack_ai", tostring((envI.revert_stack[#envI.revert_stack] or {}).ai == true))
@@ -840,6 +859,7 @@ req_state = "done"
 result_body = '{"choices":[{"message":{"content":"XYZ"}}]}'
 injected = {}
 feed(revert, envI3, ctxI3, key(0x87))
+envI3.ai_typing_until = nil   -- 测试里跳过“结果正在打字”窗口
 rec("I3_reqs", tostring(#requests))
 rec("I3_injected", table.concat(injected, ","))
 rec("I3_send_text", table.concat(sends, "|"))
@@ -853,6 +873,7 @@ req_state = "done"
 result_body = '{"choices":[{"message":{"content":"XYZ"}}]}'
 injected = {}
 feed(revert, envI3, ctxI3, key(0x87))
+envI3.ai_typing_until = nil   -- 测试里跳过“结果正在打字”窗口
 rec("I4_injected", "[" .. table.concat(injected, ",") .. "]")
 rec("I4_send_text", table.concat(sends, "|"))
 
@@ -866,6 +887,7 @@ req_state = "done"
 result_err = "HTTP 500"
 injected = {}
 feed(revert, envI3, ctxI3, key(0x87))
+envI3.ai_typing_until = nil   -- 测试里跳过“结果正在打字”窗口
 rec("I5_log_failed", tostring(log_has("ai: request failed - HTTP 500")))
 rec("I5_send_text", "[" .. table.concat(sends, "|") .. "]")
 
@@ -1035,6 +1057,7 @@ req_state = "done"
 result_body = '{"choices":[{"message":{"content":"XYZ"}}]}'
 injected = {}
 feed(revert, envI14, ctxI14, key(0x87))
+envI14.ai_typing_until = nil   -- 测试里跳过“结果正在打字”窗口
 rec("I14_reqs", tostring(#requests))
 rec("I14_injected", table.concat(injected, ","))
 rec("I14_send_text", table.concat(sends, "|"))
@@ -1085,6 +1108,40 @@ feed(revert, envI15b, ctxI15b, key(0x2F))
 rec("I15b_reqs", tostring(#requests))
 rec("I15b_log_no_cjk", tostring(log_has("nothing to send")))
 revert.fini(envI15b)
+
+-- I16: 等结果时按过的 / 不能在"取回结果的那一下"顺手再发一条
+local cfgI16 = cfg_plain({
+  ["actions/shortcuts"]       = "ai;=@ai",
+  ["actions/dll_dir"]         = DLLREL,
+  ["actions/debounce_ms"]     = 0,
+  ["actions/ai/enabled"]      = true,
+  ["actions/ai/source"]       = "committed",
+  ["actions/ai/double_ms"]    = 5000,
+  ["actions/ai/online/model"] = "m",
+})
+local envI16, ctxI16 = new_env(cfgI16)
+revert.init(envI16)
+type_text(revert, envI16, ctxI16, "ai;")
+commit(ctxI16, "\u{6211}\u{51fa}\u{95e8}\u{4e86}\u{3002}")
+requests, sends = {}, {}
+envI16.ai_last_push = os.clock()
+feed(revert, envI16, ctxI16, key(0x2F))
+rec("I16_reqs_first", tostring(#requests))
+envI16.ai_last_push = os.clock()
+feed(revert, envI16, ctxI16, key(0x2F))
+rec("I16_reqs_wait", tostring(#requests))
+req_state = "done"
+result_body = '{"choices":[{"message":{"content":"XYZ"}}]}'
+feed(revert, envI16, ctxI16, key(0x2F))
+rec("I16_reqs_after_take", tostring(#requests))
+rec("I16_send_text", table.concat(sends, "|"))
+envI16.ai_typing_until = nil
+feed(revert, envI16, ctxI16, key(0x2F))
+rec("I16_reqs_one", tostring(#requests))
+feed(revert, envI16, ctxI16, key(0x2F))
+rec("I16_reqs_two", tostring(#requests))
+revert.fini(envI16)
+
 revert.fini(envI)
 
 -- =====================================================================
@@ -1223,9 +1280,11 @@ return table.concat(out, "|")
 
 
 def main():
-    prepare_fake_userdir()
+    # 别让当前目录里的 actions.lua 被 require 抢先当成模块（它只是组件脚本）
+    os.chdir(os.path.dirname(BASE))
     if not build_dry_run_dll():
         return 1
+    prepare_fake_userdir()
 
     lua_src = LUA_SRC.replace("USERDIR_DRY", repr(USERDIR_DRY.replace("\\", "/")))
     lua_src = lua_src.replace("USERDIR", repr(USERDIR_ON_DISK.replace("\\", "/")))
@@ -1501,6 +1560,12 @@ def main():
         "I15b_first": "1",
         "I15b_reqs": "0",
         "I15b_log_no_cjk": "true",
+        "I16_reqs_first": "1",
+        "I16_reqs_wait": "1",
+        "I16_reqs_after_take": "1",
+        "I16_send_text": "XYZ",
+        "I16_reqs_one": "1",
+        "I16_reqs_two": "2",
         # E: broken dll_dir
         "E_good_entry_removed": "true",
         "E_cpath_clean": "true",
