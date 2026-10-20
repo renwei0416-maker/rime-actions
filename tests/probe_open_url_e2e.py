@@ -3,21 +3,18 @@
 验证办法：起一个本地 HTTP 服务，让 open_url 打开 http://127.0.0.1:<port>/probe-open-url，
 然后看服务端日志里有没有这条 GET —— 有就说明浏览器确实被拉起来了。
 
-用法：python tests\probe_open_url_e2e.py [URL]
-dll 位置默认是仓库根目录，可用环境变量 DLLDIR 指定。
+用法：python probe_open_url_e2e.py http://127.0.0.1:8765/probe-open-url
 """
 import ctypes as C
-import os
 import pathlib
 import sys
 import time
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-RIME = os.environ.get("RIME_DLL", r"C:\Program Files\Rime\weasel-0.17.4\rime.dll")
-DLLDIR = os.environ.get("DLLDIR", _ROOT)
-DLL = pathlib.Path(DLLDIR) / "sendKeyCode.dll"
+RIME = r"C:\Program Files\Rime\weasel-0.17.4\rime.dll"
+DLLDIR = r"C:\Users\Administrator\Desktop\Ai_Work\DSH_harness\backspace-build"
+DLL = pathlib.Path(DLLDIR) / "actions.dll"
 URL = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8765/probe-open-url"
 
 D = C.CDLL(RIME)
@@ -48,7 +45,7 @@ def lua(src, args=1):
 
 
 lua('package.cpath = [[' + DLLDIR + r'\?.dll]] .. ";" .. package.cpath')
-print("require:", lua('SK = require("sendKeyCode") return type(SK.open_url)'))
+print("require:", lua('SK = require("actions") return type(SK.open_url)'))
 
 ret = lua('return SK.open_url([[' + URL + ']])')
 print("open_url ->", ret, "(1=已排队)")

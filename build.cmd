@@ -1,8 +1,8 @@
 @echo off
 setlocal
 rem ===================================================================
-rem  build.cmd - build sendKeyCode.dll (Rime / Weasel Lua C module, x64)
-rem  Compiles ONLY sendKeyCode.c - no other source file of the project.
+rem  build.cmd - build actions.dll (Rime / Weasel Lua C module, x64)
+rem  Compiles ONLY actions.c.
 rem  Requires: MSYS2 MinGW-w64 x64 gcc, plus rime.dll of the target Weasel
 rem            (rime.dll embeds Lua 5.4 and provides luaL_*/lua_* imports).
 rem ===================================================================
@@ -28,14 +28,14 @@ set "PATH=%MINGW_BIN%;%PATH%"
 
 cd /d "%~dp0"
 
-echo [1/2] compiling and linking ^(sendKeyCode.c only^) ...
-gcc -shared -fPIC -o sendKeyCode.dll sendKeyCode.c -Iinclude -L"%WEASEL_DIR%" -luser32 -lshell32 -lrime -O2 -Wl,--no-insert-timestamp
+echo [1/2] compiling and linking ^(actions.c only^) ...
+gcc -shared -fPIC -o actions.dll actions.c -Iinclude -L"%WEASEL_DIR%" -luser32 -lshell32 -lwinhttp -lrime -O2 -Wl,--no-insert-timestamp
 if errorlevel 1 (
   echo [ERROR] build failed
   exit /b 1
 )
 
 echo [2/2] done
-for %%F in ("sendKeyCode.dll") do echo   output: %%~fF  ^(%%~zF bytes^)
-certutil -hashfile "sendKeyCode.dll" SHA256 | findstr /v ":"
+for %%F in ("actions.dll") do echo   output: %%~fF  ^(%%~zF bytes^)
+certutil -hashfile "actions.dll" SHA256 | findstr /v ":"
 endlocal

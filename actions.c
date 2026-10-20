@@ -1,24 +1,30 @@
 /*
- * 小狼毫（Rime / Weasel）用的 Windows 专用 Lua C 模块。
+ * rime-actions / 上屏动作 —— Windows 专用 Lua C 模块（x64）。
  *
- * 对外提供三个函数：
- *   press_backspace(count) —— 请求"删除 count 个字符"
- *   press_keys(spec[, gap_ms]) —— 请求"发一串按键组合"，gap_ms = 相邻两次按键
- *                          之间等多少毫秒（省略则 30）
- *   open_url(url)          —— 请求"用默认浏览器打开这个网址"（http/https）
+ * 对外提供十个函数：
+ *   press_backspace(count)             删除 count 个字符（连续退格）
+ *   press_keys(spec[, gap_ms])         发一串按键组合；gap_ms 为相邻按键事件之间的间隔
+ *   open_url(url)                      用默认浏览器打开网址（仅 http/https）
+ *   send_text(utf8)                    把文本逐字打到光标处（不经过剪贴板）
+ *   clipboard_get()                    读剪贴板里的文本
+ *   http_request(url, body, headers)   异步 HTTP(S) POST，立即返回序号
+ *   http_state()                       查询请求状态与序号
+ *   http_result()                      取回响应体或错误
+ *   http_cancel()                      丢弃进行中/已完成的请求
+ *   nudge(delay_ms[, vk])              延时敲一个空键（默认 F24），用于唤醒输入法
  *
- * press_keys 的 spec 语法（大小写都行，多余空格会被忽略）：
+ * press_keys 的 spec 语法（大小写不敏感，多余空格会被忽略）：
  *   "ctrl+z"                  发一次 Ctrl+Z
- *   "shift+home"              发一次 Shift/Home
+ *   "shift+home"              发一次 Shift+Home
  *   "ctrl+shift+k"            发一次 Ctrl+Shift+K
- *   "ctrl+backspace"          发一次 Ctrl+Backspace（= 删前一个词）
- *   "shift+home,shift+left"   逗号分隔 = 依次发多步
+ *   "ctrl+backspace"          发一次 Ctrl+Backspace（删前一个词）
+ *   "shift+home,shift+left"   逗号分隔 = 依次发多步；每步的按键全部抬起后才发下一步
  *
- * 按键节奏（gap_ms，默认 30，范围 0..500）：每发出一个按键事件之后都等这么久
- * 再发下一个 —— 同一个组合键里的"修饰键→主键→抬起"之间也用这个间隔，多步之间
- * 同样用它。有些编辑器/程序对瞬间到达的一串按键反应不过来（表现为只走了第一步、
- * 或者修饰键像没按住），把这个值调大（100~200）通常就好了。
- * 可用的键名：单字母 a-z、单数字 0-9，另有
+ * 按键节奏（gap_ms，默认 30，范围 0..500）：每发出一个按键事件后先等这么久再发
+ * 下一个，组合键内部（修饰键→主键→抬起）与多步之间都按这个间隔。部分程序对
+ * 瞬时到达的按键串反应不过来（只执行第一步、或修饰键像是没按住），调大该值可解决。
+ *
+ * 可用的键名：单字母 a-z、单数字 0-9，以及
  *   backspace tab return enter escape esc space pageup pagedown end home
  *   left up right down insert delete del capslock
  *   f1..f12 numpad0..numpad9
@@ -26,37 +32,35 @@
  *   bracketleft bracketright backslash
  * 可用的修饰键：ctrl / control、shift、alt、win / super / cmd
  *
- * 为什么改成异步（重要）：
- *   小狼毫（librime）处理一次按键的过程中，如果在同一个回调里调用
- *   SendInput，注入的按键会立刻重新进入输入法自己的键盘钩子 —— 等于让
- *   引擎"在处理按键的中途又处理按键"（重入）。一次触发要删几十个字，就
- *   制造几十次重入窗口，连按成倍叠加，引擎内部状态被破坏后崩溃（实测崩在
- *   rime.dll 内部，异常码 0xc0000005 访问冲突）。
- *
- *   所以这里不立刻发按键：调用只把请求放进一个"待发槽位"就返回，由后台
- *   线程等一小会儿（等这次按键处理完、编码窗口稳定）再分批发。同一时刻只
- *   允许一个请求在跑；距上次注入太近的请求直接丢弃。
+ * 线程模型：按键注入、HTTP 请求、文本发送都在内部后台线程完成，调用立即返回。
+ * 同一时刻只允许一个同类动作执行，过密的请求直接忽略。按键注入必须异步：在输入法
+ * 的按键回调里直接调用 SendInput 会让注入的按键重入输入法自身的键盘钩子，连续触发
+ * 时可能破坏引擎状态（崩溃在 rime.dll 内部，0xc0000005）。
  *
  * 返回值：
  *   press_backspace —— 本次被接受的退格数；0 表示被忽略。
- *   press_keys      —— 1 表示已排队；
- *                      2 表示被忽略（上一个还在发 / 距上次太近，不是参数问题）；
- *                      0 表示参数非法（spec 解析不出任何按键）。
- *   open_url        —— 1 表示已排队；
- *                      2 表示被忽略（上一个还在跑 / 距上次太近）；
- *                      0 表示参数非法（空串、太长、或者不是 http/https 地址）。
- *                      地址里的中文要由调用方先做 UTF-8 percent-encode。
+ *   press_keys      —— 1 已排队；2 被忽略（上一个还在发 / 距上次太近）；0 参数非法。
+ *   open_url        —— 1 已排队；2 被忽略；0 参数非法（空串、过长、非 http/https）。
+ *                      地址里的中文需由调用方先做 UTF-8 percent-encode。
+ *   send_text       —— 1 已排队；0 参数非法（空串或超过 20000 字节）。
+ *   clipboard_get   —— 文本 + nil；失败时 nil + 错误说明。
+ *   http_request    —— 正数 = 本次请求序号；-1 = 上一个请求还没回来；
+ *                      0 = 参数非法（URL 协议/长度、body 或 headers 超长）。
+ *   http_state      —— 状态字符串（running / done / failed / idle）+ 序号。
+ *   http_result     —— done 时返回 响应体 + nil；failed 时 nil + 错误说明；
+ *                      还在 running 时返回 nil + nil。
+ *   http_cancel     —— 1 丢弃了一个已完成的响应；0 没有可丢弃的响应。
+ *   nudge           —— 1 已排队；0 参数非法。
  *
- * 由用户提供的 sendKeyCode.c 改来：删掉了 press_ctrl_z()，先换成
- * press_backspace()，再加上通用的 press_keys()。
- * 模块入口、EXPORT 宏、luaL_Reg 注册方式都没动。
- *
- * 编译时要和"目标小狼毫所用的 Lua 头文件 / 导入库"配套，架构（x64）和 ABI 必须一致。
+ * 编译：Lua 头文件与导入库要和目标小狼毫配套，架构（x64）与 ABI 必须一致；
+ * 链接需要 user32 / shell32 / winhttp / rime。
  */
+
 #include <lua.h>
 #include <lauxlib.h>
 #include <windows.h>
 #include <shellapi.h>
+#include <winhttp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -65,8 +69,8 @@
 #define EXPORT __declspec(dllexport)
 
 /* 防呆上限：挡住 Lua 那边传过来的异常大数字。
- * 真正的"单次最多删多少字"由 Lua 侧的 revert/max_backspaces 决定，
- * 这里只要不小于 revert.lua 里 LIMITS.max_backspaces（当前 10000）就行。 */
+ * 真正的"单次最多删多少字"由 Lua 侧的 actions/max_backspaces 决定，
+ * 这里只要不小于 actions.lua 里 LIMITS.max_backspaces（当前 10000）就行。 */
 #define MAX_BACKSPACES 10000
 
 /* ---------------- 异步注入参数 ---------------- */
@@ -92,9 +96,9 @@ static volatile LONG      g_busy       = 0;
 static volatile ULONGLONG g_last_start = 0;
 static PVOID              g_worker     = NULL;
 
-/* 离线自测专用：用 -DSENDKEYCODE_DRY_RUN 另编一份"只记不发"的 dll 来验证
+/* 离线自测专用：用 -DACTIONS_DRY_RUN 另编一份"只记不发"的 dll 来验证
  * 异步流程与按键序列，正式 dll 不含任何测试钩子（下面这些 #ifdef 都不会编进去）。 */
-#ifdef SENDKEYCODE_DRY_RUN
+#ifdef ACTIONS_DRY_RUN
 static volatile LONG g_dry_run_sent   = 0;
 #define DRY_RUN_MAX_EVENTS 512
 static char          g_dry_run_log[DRY_RUN_MAX_EVENTS][20];
@@ -109,7 +113,7 @@ static volatile LONG g_dry_run_gap = STEP_GAP_MS;
 /* 把一批按键发出去，返回成功发出的按键个数 */
 static UINT send_batch(INPUT *events, UINT total)
 {
-#ifdef SENDKEYCODE_DRY_RUN
+#ifdef ACTIONS_DRY_RUN
     UINT i;
     InterlockedExchangeAdd(&g_dry_run_sent, (LONG)total);
     for (i = 0; i < total; i++) {
@@ -144,7 +148,7 @@ static UINT send_events_spaced(INPUT *events, UINT total, int gap)
     if (gap <= 0 || total == 0)
         return send_batch(events, total);
 
-#ifdef SENDKEYCODE_DRY_RUN
+#ifdef ACTIONS_DRY_RUN
     /* 自测版只记录事件、不真的等，否则一次触发要跑好几秒 */
     return send_batch(events, total);
 #else
@@ -489,7 +493,7 @@ static int inject_backspaces(int count)
  * 交给 ShellExecuteW —— 走的是系统"打开"关联，不经过 cmd.exe，所以不闪黑框。 */
 static void open_url_now(const char *url)
 {
-#ifdef SENDKEYCODE_DRY_RUN
+#ifdef ACTIONS_DRY_RUN
     size_t n = strlen(url);
 
     InterlockedIncrement(&g_dry_run_url_opens);
@@ -633,7 +637,7 @@ static int l_press_keys(lua_State *L)
         gap_arg = MAX_KEY_GAP_MS;
     gap = (int)gap_arg;
 
-#ifdef SENDKEYCODE_DRY_RUN
+#ifdef ACTIONS_DRY_RUN
     /* 自测用：无论这次是否被忽略，都记下解析出来的间隔 */
     InterlockedExchange(&g_dry_run_gap, (LONG)gap);
 #endif
@@ -715,7 +719,7 @@ static int l_open_url(lua_State *L)
     return 1;
 }
 
-#ifdef SENDKEYCODE_DRY_RUN
+#ifdef ACTIONS_DRY_RUN
 /* 只有自测 dll 才有：返回"本来会发出去的按键总数" */static int l_dry_run_sent(lua_State *L)
 {
     lua_pushinteger(L, (lua_Integer)g_dry_run_sent);
@@ -775,11 +779,605 @@ static int l_dry_run_gap(lua_State *L)
 }
 #endif
 
+/* ==================================================================
+ * 异步 HTTP（给 AI 助手用）
+ *
+ * 和 press_keys 同一个原则：绝不在按键回调里做网络。
+ *   http_request(url, body, headers) —— 把参数丢进槽位、起一个后台线程，立刻返回序号
+ *   http_state()                    —— "idle" / "running" / "done" / "failed"（外加序号）
+ *   http_result()                   —— 取结果（取完自动回到 idle）
+ *   http_cancel()                   —— 丢弃当前请求的结果
+ *
+ * 为什么不用 curl / python / powershell：WinHTTP 是系统自带的（winhttp.dll），
+ * 走系统代理和证书，不需要任何外部程序。
+ * ================================================================== */
+#define HTTP_MAX_URL   2048
+#define HTTP_MAX_HDRS  4096
+#define HTTP_MAX_BODY  (256 * 1024)
+#define HTTP_MAX_RESP  (4 * 1024 * 1024)
+
+#define HTTP_CONNECT_TIMEOUT_MS  4000
+#define HTTP_SEND_TIMEOUT_MS    15000
+#define HTTP_RECV_TIMEOUT_MS    60000
+
+#define HTTP_IDLE     0
+#define HTTP_RUNNING  1
+#define HTTP_DONE     2
+#define HTTP_FAILED   3
+
+static volatile LONG g_http_state = HTTP_IDLE;
+static volatile LONG g_http_seq   = 0;
+static char          *g_http_result = NULL;   /* DONE 时有效，malloc 的 */
+static size_t         g_http_result_len = 0;
+static char           g_http_error[512];
+static CRITICAL_SECTION g_http_lock;
+static volatile LONG  g_http_lock_ready = 0;
+
+static void http_lock_init(void)
+{
+    if (InterlockedCompareExchange(&g_http_lock_ready, 1, 0) == 0)
+        InitializeCriticalSection(&g_http_lock);
+}
+
+/* UTF-8 → 宽字符（malloc 的新串，调用方 free） */
+static WCHAR *http_utf8_to_wide(const char *s)
+{
+    int need;
+    WCHAR *w;
+
+    if (!s)
+        return NULL;
+    need = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
+    if (need <= 0)
+        return NULL;
+    w = (WCHAR *)malloc(sizeof(WCHAR) * (size_t)need);
+    if (!w)
+        return NULL;
+    if (MultiByteToWideChar(CP_UTF8, 0, s, -1, w, need) <= 0) {
+        free(w);
+        return NULL;
+    }
+    return w;
+}
+
+typedef struct {
+    char *url;
+    char *body;
+    DWORD body_len;
+    char *headers;
+    LONG  seq;
+} http_job;
+
+/* 真正发请求（只在后台线程里跑，阻塞无所谓） */
+static void http_do_request(http_job *job, char **out_body, size_t *out_len, char *err, size_t errcap)
+{
+    WCHAR *wurl = NULL, *whost = NULL, *wpath = NULL, *whdrs = NULL;
+    URL_COMPONENTS uc;
+    HINTERNET session = NULL, connect = NULL, request = NULL;
+    DWORD status = 0, status_len = sizeof(status);
+    char *buf = NULL;
+    size_t used = 0, cap = 0;
+    int secure;
+    WCHAR *path_ptr;
+
+    *out_body = NULL;
+    *out_len = 0;
+    err[0] = '\0';
+
+    wurl = http_utf8_to_wide(job->url);
+    if (!wurl) { snprintf(err, errcap, "网址无法转成宽字符"); goto done; }
+
+    ZeroMemory(&uc, sizeof(uc));
+    uc.dwStructSize = sizeof(uc);
+    uc.dwSchemeLength = (DWORD)-1;
+    uc.dwHostNameLength = (DWORD)-1;
+    uc.dwUrlPathLength = (DWORD)-1;
+    uc.dwExtraInfoLength = (DWORD)-1;
+    if (!WinHttpCrackUrl(wurl, 0, 0, &uc)) {
+        snprintf(err, errcap, "网址解析失败（要 http:// 或 https:// 开头），GetLastError=%lu", GetLastError());
+        goto done;
+    }
+    secure = (uc.nScheme == INTERNET_SCHEME_HTTPS);
+
+    whost = (WCHAR *)malloc(sizeof(WCHAR) * ((size_t)uc.dwHostNameLength + 1));
+    if (!whost) { snprintf(err, errcap, "内存不足（host）"); goto done; }
+    memcpy(whost, uc.lpszHostName, sizeof(WCHAR) * uc.dwHostNameLength);
+    whost[uc.dwHostNameLength] = L'\0';
+
+    {
+        size_t plen = (size_t)uc.dwUrlPathLength + (size_t)uc.dwExtraInfoLength;
+        if (plen == 0) {
+            wpath = (WCHAR *)malloc(sizeof(WCHAR) * 2);
+            if (!wpath) { snprintf(err, errcap, "内存不足（path）"); goto done; }
+            wpath[0] = L'/';
+            wpath[1] = L'\0';
+        } else {
+            wpath = (WCHAR *)malloc(sizeof(WCHAR) * (plen + 1));
+            if (!wpath) { snprintf(err, errcap, "内存不足（path）"); goto done; }
+            path_ptr = wpath;
+            memcpy(path_ptr, uc.lpszUrlPath, sizeof(WCHAR) * uc.dwUrlPathLength);
+            path_ptr += uc.dwUrlPathLength;
+            if (uc.dwExtraInfoLength > 0)
+                memcpy(path_ptr, uc.lpszExtraInfo, sizeof(WCHAR) * uc.dwExtraInfoLength);
+            wpath[plen] = L'\0';
+        }
+    }
+
+#ifdef WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY
+    session = WinHttpOpen(L"rime-ai-assist/1.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                          WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session)
+#endif
+    {
+        session = WinHttpOpen(L"rime-ai-assist/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                              WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    }
+    if (!session) { snprintf(err, errcap, "WinHttpOpen 失败，GetLastError=%lu", GetLastError()); goto done; }
+
+    WinHttpSetTimeouts(session, HTTP_CONNECT_TIMEOUT_MS, HTTP_SEND_TIMEOUT_MS,
+                       HTTP_RECV_TIMEOUT_MS, HTTP_RECV_TIMEOUT_MS);
+
+    connect = WinHttpConnect(session, whost, (INTERNET_PORT)uc.nPort, 0);
+    if (!connect) { snprintf(err, errcap, "WinHttpConnect 失败，GetLastError=%lu", GetLastError()); goto done; }
+
+    request = WinHttpOpenRequest(connect, L"POST", wpath, NULL, WINHTTP_NO_REFERER,
+                                 WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                 secure ? WINHTTP_FLAG_SECURE : 0);
+    if (!request) { snprintf(err, errcap, "WinHttpOpenRequest 失败，GetLastError=%lu", GetLastError()); goto done; }
+
+    if (job->headers && job->headers[0]) {
+        whdrs = http_utf8_to_wide(job->headers);
+        if (whdrs) {
+            WinHttpAddRequestHeaders(request, whdrs, (DWORD)-1L,
+                                     WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
+        }
+    }
+
+    if (!WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                            (LPVOID)job->body, job->body_len, job->body_len, 0)) {
+        snprintf(err, errcap, "发送失败（连不上或 TLS 握手失败），GetLastError=%lu", GetLastError());
+        goto done;
+    }
+    if (!WinHttpReceiveResponse(request, NULL)) {
+        snprintf(err, errcap, "收响应失败，GetLastError=%lu", GetLastError());
+        goto done;
+    }
+
+    WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                        WINHTTP_HEADER_NAME_BY_INDEX, &status, &status_len, WINHTTP_NO_HEADER_INDEX);
+
+    for (;;) {
+        DWORD avail = 0;
+        DWORD got = 0;
+
+        if (!WinHttpQueryDataAvailable(request, &avail)) {
+            snprintf(err, errcap, "读取响应失败，GetLastError=%lu", GetLastError());
+            goto done;
+        }
+        if (avail == 0)
+            break;
+        if (used + avail + 1 > HTTP_MAX_RESP) {
+            snprintf(err, errcap, "响应太大（超过 %d 字节）", HTTP_MAX_RESP);
+            goto done;
+        }
+        if (used + avail + 1 > cap) {
+            size_t ncap = cap ? cap : 4096;
+            char *nb;
+            while (ncap < used + avail + 1)
+                ncap *= 2;
+            if (ncap > HTTP_MAX_RESP)
+                ncap = HTTP_MAX_RESP;
+            nb = (char *)realloc(buf, ncap);
+            if (!nb) { snprintf(err, errcap, "内存不足（响应）"); goto done; }
+            buf = nb;
+            cap = ncap;
+        }
+        if (!WinHttpReadData(request, buf + used, avail, &got)) {
+            snprintf(err, errcap, "读数据失败，GetLastError=%lu", GetLastError());
+            goto done;
+        }
+        used += got;
+    }
+
+    if (used + 1 > cap) {
+        char *nb = (char *)realloc(buf, used + 1);
+        if (!nb) { snprintf(err, errcap, "内存不足（响应）"); goto done; }
+        buf = nb;
+        cap = used + 1;
+    }
+    buf[used] = '\0';
+
+    if (status >= 400) {
+        /* 把服务端的错误正文一起带回去，方便 Lua 侧显示 */
+        snprintf(err, errcap, "HTTP %lu: %.400s", (unsigned long)status, buf ? buf : "");
+        goto done;
+    }
+
+    *out_body = buf;
+    *out_len = used;
+    buf = NULL;
+
+done:
+    if (buf) free(buf);
+    if (whdrs) free(whdrs);
+    if (request) WinHttpCloseHandle(request);
+    if (connect) WinHttpCloseHandle(connect);
+    if (session) WinHttpCloseHandle(session);
+    if (wpath) free(wpath);
+    if (whost) free(whost);
+    if (wurl) free(wurl);
+}
+
+static DWORD WINAPI http_thread_main(LPVOID param)
+{
+    http_job *job = (http_job *)param;
+    char *body = NULL;
+    size_t len = 0;
+    char err[512];
+
+    http_do_request(job, &body, &len, err, sizeof(err));
+
+    EnterCriticalSection(&g_http_lock);
+    if (body) {
+        if (g_http_result)
+            free(g_http_result);
+        g_http_result = body;
+        g_http_result_len = len;
+        g_http_error[0] = '\0';
+        InterlockedExchange(&g_http_state, HTTP_DONE);
+    } else {
+        snprintf(g_http_error, sizeof(g_http_error), "%s", err[0] ? err : "未知错误");
+        InterlockedExchange(&g_http_state, HTTP_FAILED);
+    }
+    LeaveCriticalSection(&g_http_lock);
+
+    free(job->url);
+    free(job->body);
+    free(job->headers);
+    free(job);
+    return 0;
+}
+
+/* http_request(url, body, headers) -> 序号(>=1) | 0=参数非法 | -1=上一个还没跑完 */
+static int l_http_request(lua_State *L)
+{
+    const char *url = luaL_checkstring(L, 1);
+    size_t body_len = 0;
+    const char *body = luaL_optlstring(L, 2, "", &body_len);
+    const char *headers = luaL_optstring(L, 3, "");
+    http_job *job;
+    HANDLE th;
+    LONG seq;
+
+    if (!url || !url[0] || strlen(url) > HTTP_MAX_URL) {
+        lua_pushinteger(L, 0);
+        return 1;
+    }
+    if (body_len > HTTP_MAX_BODY) {
+        lua_pushinteger(L, 0);
+        return 1;
+    }
+    if (!strstr(url, "http://") && !strstr(url, "https://")) {
+        lua_pushinteger(L, 0);
+        return 1;
+    }
+    if (strlen(headers) > HTTP_MAX_HDRS) {
+        lua_pushinteger(L, 0);
+        return 1;
+    }
+
+    http_lock_init();
+    if (InterlockedCompareExchange(&g_http_state, HTTP_RUNNING, HTTP_IDLE) != HTTP_IDLE) {
+        lua_pushinteger(L, -1);
+        return 1;
+    }
+
+    job = (http_job *)calloc(1, sizeof(http_job));
+    if (!job) {
+        InterlockedExchange(&g_http_state, HTTP_IDLE);
+        lua_pushinteger(L, 0);
+        return 1;
+    }
+    job->url = _strdup(url);
+    job->body = (char *)malloc(body_len + 1);
+    job->headers = _strdup(headers ? headers : "");
+    if (!job->url || !job->body || !job->headers) {
+        free(job->url); free(job->body); free(job->headers); free(job);
+        InterlockedExchange(&g_http_state, HTTP_IDLE);
+        lua_pushinteger(L, 0);
+        return 1;
+    }
+    memcpy(job->body, body, body_len);
+    job->body[body_len] = '\0';
+    job->body_len = (DWORD)body_len;
+
+    seq = InterlockedIncrement(&g_http_seq);
+    job->seq = seq;
+
+    th = CreateThread(NULL, 0, http_thread_main, job, 0, NULL);
+    if (!th) {
+        free(job->url); free(job->body); free(job->headers); free(job);
+        InterlockedExchange(&g_http_state, HTTP_IDLE);
+        lua_pushinteger(L, 0);
+        return 1;
+    }
+    CloseHandle(th);
+
+    lua_pushinteger(L, seq);
+    return 1;
+}
+
+/* http_state() -> "idle"|"running"|"done"|"failed", 当前序号 */
+static int l_http_state(lua_State *L)
+{
+    LONG st = g_http_state;
+
+    switch (st) {
+    case HTTP_RUNNING: lua_pushliteral(L, "running"); break;
+    case HTTP_DONE:    lua_pushliteral(L, "done");    break;
+    case HTTP_FAILED:  lua_pushliteral(L, "failed");  break;
+    default:           lua_pushliteral(L, "idle");    break;
+    }
+    lua_pushinteger(L, (lua_Integer)g_http_seq);
+    return 2;
+}
+
+/* http_result() -> body, nil   或者   nil, 错误    取完回到 idle */
+static int l_http_result(lua_State *L)
+{
+    LONG st = g_http_state;
+
+    if (st == HTTP_DONE) {
+        EnterCriticalSection(&g_http_lock);
+        lua_pushlstring(L, g_http_result ? g_http_result : "", g_http_result_len);
+        if (g_http_result) {
+            free(g_http_result);
+            g_http_result = NULL;
+            g_http_result_len = 0;
+        }
+        LeaveCriticalSection(&g_http_lock);
+        InterlockedExchange(&g_http_state, HTTP_IDLE);
+        lua_pushnil(L);
+        return 2;
+    }
+    if (st == HTTP_FAILED) {
+        EnterCriticalSection(&g_http_lock);
+        lua_pushnil(L);
+        lua_pushstring(L, g_http_error);
+        LeaveCriticalSection(&g_http_lock);
+        InterlockedExchange(&g_http_state, HTTP_IDLE);
+        return 2;
+    }
+    lua_pushnil(L);
+    if (st == HTTP_RUNNING)
+        lua_pushliteral(L, "running");
+    else
+        lua_pushliteral(L, "idle");
+    return 2;
+}
+
+/* http_cancel() -> 1（有东西被丢掉）| 0 */
+static int l_http_cancel(lua_State *L)
+{
+    LONG st = g_http_state;
+    LONG dropped = 0;
+
+    if (st == HTTP_DONE || st == HTTP_FAILED) {
+        EnterCriticalSection(&g_http_lock);
+        if (g_http_result) {
+            free(g_http_result);
+            g_http_result = NULL;
+            g_http_result_len = 0;
+        }
+        g_http_error[0] = '\0';
+        LeaveCriticalSection(&g_http_lock);
+        InterlockedExchange(&g_http_state, HTTP_IDLE);
+        dropped = 1;
+    }
+    lua_pushinteger(L, dropped);
+    return 1;
+}
+
+/* ==================================================================
+ * 剪贴板
+ *   clipboard_get() -> 文本, nil  |  nil, 错误
+ * ================================================================== */
+static int l_clipboard_get(lua_State *L)
+{
+    HANDLE h;
+    WCHAR *w;
+    int need;
+    char *u;
+
+    if (!OpenClipboard(NULL)) {
+        lua_pushnil(L);
+        lua_pushliteral(L, "打不开剪贴板");
+        return 2;
+    }
+    h = GetClipboardData(CF_UNICODETEXT);
+    if (!h) {
+        CloseClipboard();
+        lua_pushnil(L);
+        lua_pushliteral(L, "剪贴板里没有文本");
+        return 2;
+    }
+    w = (WCHAR *)GlobalLock(h);
+    if (!w) {
+        CloseClipboard();
+        lua_pushnil(L);
+        lua_pushliteral(L, "读剪贴板失败");
+        return 2;
+    }
+
+    need = WideCharToMultiByte(CP_UTF8, 0, w, -1, NULL, 0, NULL, NULL);
+    u = (char *)malloc((size_t)(need > 0 ? need : 1));
+    if (!u) {
+        GlobalUnlock(h);
+        CloseClipboard();
+        lua_pushnil(L);
+        lua_pushliteral(L, "内存不足");
+        return 2;
+    }
+    if (need > 0)
+        WideCharToMultiByte(CP_UTF8, 0, w, -1, u, need, NULL, NULL);
+
+    GlobalUnlock(h);
+    CloseClipboard();
+
+    lua_pushlstring(L, u, (size_t)(need > 0 ? need - 1 : 0));
+    free(u);
+    lua_pushnil(L);
+    return 2;
+}
+
+/* ==================================================================
+ * 唤醒键
+ *   nudge(delay_ms[, vk]) -> 1=已安排
+ *
+ * 输入法空闲时没有任何按键事件，Lua 也就不会被调用，异步拿到的结果
+ * 没机会显示出来。所以要有人在"结果到了"之后轻轻敲一个键，让引擎再
+ * 走一遍处理流程（我们自己把这个键吞掉，目标程序看不到它）。
+ * 默认 VK_F24（0x87）：绝大多数程序都不用它。
+ * ================================================================== */
+typedef struct {
+    DWORD delay;
+    WORD  vk;
+} nudge_job;
+
+static DWORD WINAPI nudge_thread(LPVOID param)
+{
+    nudge_job *job = (nudge_job *)param;
+    INPUT in;
+
+    Sleep(job->delay > 5000 ? 5000 : job->delay);
+
+    ZeroMemory(&in, sizeof(in));
+    in.type = INPUT_KEYBOARD;
+    in.ki.wVk = job->vk;
+    in.ki.dwFlags = 0;
+    SendInput(1, &in, sizeof(in));
+
+    Sleep(30);
+
+    ZeroMemory(&in, sizeof(in));
+    in.type = INPUT_KEYBOARD;
+    in.ki.wVk = job->vk;
+    in.ki.dwFlags = KEYEVENTF_KEYUP;
+    SendInput(1, &in, sizeof(in));
+
+    free(job);
+    return 0;
+}
+
+static int l_nudge(lua_State *L)
+{
+    int delay = (int)luaL_optinteger(L, 1, 0);
+    int vk = (int)luaL_optinteger(L, 2, 0x87);
+    nudge_job *job;
+    HANDLE th;
+
+    if (delay < 0) delay = 0;
+    if (vk <= 0 || vk > 0xFE) vk = 0x87;
+
+    job = (nudge_job *)calloc(1, sizeof(nudge_job));
+    if (!job) {
+        lua_pushinteger(L, 0);
+        return 1;
+    }
+    job->delay = (DWORD)delay;
+    job->vk = (WORD)vk;
+
+    th = CreateThread(NULL, 0, nudge_thread, job, 0, NULL);
+    if (!th) {
+        free(job);
+        lua_pushinteger(L, 0);
+        return 1;
+    }
+    CloseHandle(th);
+    lua_pushinteger(L, 1);
+    return 1;
+}
+
+/* ==================================================================
+ * 直接插入文本
+ *   send_text(utf8[, delay_ms]) -> 1=已安排
+ *
+ * 用 SendInput 的"Unicode 字符"模式把整段文字打进当前窗口（相当于逐个
+ * 字符输入，但不经过输入法、不碰剪贴板）。
+ * 和 press_keys 一样必须在后台线程里延时再发：正在处理按键时注入会重入。
+ * ================================================================== */
+static DWORD WINAPI send_text_thread(LPVOID param)
+{
+    char *text = (char *)param;
+    WCHAR *w;
+    int need, i;
+
+    Sleep(250); /* 等这次按键处理结束，编码窗口稳定 */
+
+    need = MultiByteToWideChar(CP_UTF8, 0, text, -1, NULL, 0);
+    w = (WCHAR *)malloc(sizeof(WCHAR) * (size_t)(need > 0 ? need : 1));
+    if (w && need > 0) {
+        MultiByteToWideChar(CP_UTF8, 0, text, -1, w, need);
+        for (i = 0; i < need - 1; i++) {
+            INPUT in[2];
+            ZeroMemory(in, sizeof(in));
+            in[0].type = INPUT_KEYBOARD;
+            in[0].ki.wScan = w[i];
+            in[0].ki.dwFlags = KEYEVENTF_UNICODE;
+            in[1].type = INPUT_KEYBOARD;
+            in[1].ki.wScan = w[i];
+            in[1].ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
+            SendInput(2, in, sizeof(INPUT));
+            Sleep(2);
+        }
+    }
+    free(w);
+    free(text);
+    return 0;
+}
+
+static int l_send_text(lua_State *L)
+{
+    size_t len = 0;
+    const char *text = luaL_checklstring(L, 1, &len);
+    char *copy;
+    HANDLE th;
+
+    if (!text || len == 0 || len > 20000) {
+        lua_pushinteger(L, 0);
+        return 1;
+    }
+    copy = (char *)malloc(len + 1);
+    if (!copy) {
+        lua_pushinteger(L, 0);
+        return 1;
+    }
+    memcpy(copy, text, len);
+    copy[len] = '\0';
+
+    th = CreateThread(NULL, 0, send_text_thread, copy, 0, NULL);
+    if (!th) {
+        free(copy);
+        lua_pushinteger(L, 0);
+        return 1;
+    }
+    CloseHandle(th);
+    lua_pushinteger(L, 1);
+    return 1;
+}
+
 static const luaL_Reg module_functions[] = {
     {"press_backspace", l_press_backspace},
     {"press_keys",      l_press_keys},
     {"open_url",        l_open_url},
-#ifdef SENDKEYCODE_DRY_RUN
+    {"clipboard_get",   l_clipboard_get},
+    {"nudge",           l_nudge},
+    {"send_text",       l_send_text},
+    {"http_request",    l_http_request},
+    {"http_state",      l_http_state},
+    {"http_result",     l_http_result},
+    {"http_cancel",     l_http_cancel},
+#ifdef ACTIONS_DRY_RUN
     {"_dry_run_sent",   l_dry_run_sent},
     {"_dry_run_reset",  l_dry_run_reset},
     {"_dry_run_events", l_dry_run_events},
@@ -790,8 +1388,9 @@ static const luaL_Reg module_functions[] = {
     {NULL, NULL}
 };
 
-EXPORT int luaopen_sendKeyCode(lua_State *L)
+EXPORT int luaopen_actions(lua_State *L)
 {
+    http_lock_init();
     luaL_newlib(L, module_functions);
     return 1;
 }

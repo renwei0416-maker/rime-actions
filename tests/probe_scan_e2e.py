@@ -2,7 +2,7 @@
 """End-to-end check of the scan-code injection using the PRODUCTION dll.
 
 Owns a test window with an EDIT, forces it foreground, then asks the real
-<仓库根目录>\\sendKeyCode.dll (loaded through rime.dll's Lua, the same way
+backspace-build\\actions.dll (loaded through rime.dll's Lua, the same way
 Rime loads it) to send chords, and reads the EDIT selection back:
 
     shift+left       -> caret moves AND one char is selected (21..22)
@@ -16,13 +16,11 @@ modifier and the app got the bare arrow. Injection goes to this script's own
 window only; ASCII output.
 """
 import ctypes as C
-import os
 
 import probe_inject_variants as P
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-RIME = os.environ.get("RIME_DLL", r"C:\Program Files\Rime\weasel-0.17.4\rime.dll")
-DLL = os.environ.get("DLL_PATH", os.path.join(_ROOT, "sendKeyCode.dll"))
+RIME = r"C:\Program Files\Rime\weasel-0.17.4\rime.dll"
+DLL = r"C:\Users\Administrator\Desktop\Ai_Work\DSH_harness\backspace-build\actions.dll"
 
 D = C.CDLL(RIME)
 D.luaL_newstate.restype = C.c_void_p
@@ -48,7 +46,7 @@ def lua(src):
 
 
 print("dll:", lua(
-    'local f = package.loadlib([[' + DLL + ']], "luaopen_sendKeyCode")\n'
+    'local f = package.loadlib([[' + DLL + ']], "luaopen_actions")\n'
     'SK = f()\n'
     'return type(SK.press_keys) .. "/" .. type(SK.press_backspace)'
     ' .. "/ dry_run=" .. tostring(SK._dry_run_sent)'))

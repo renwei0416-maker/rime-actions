@@ -1,7 +1,7 @@
 """Offline verification for backspace-build (v4: processor component).
 
 Loads rime.dll's own embedded Lua 5.4 (the runtime WeaselServer actually uses),
-requires the freshly built sendKeyCode.dll, and drives revert.lua the way Rime
+requires the freshly built actions.dll, and drives actions.lua the way Rime
 does for a **processor** component: every call gets a raw KeyEvent, and the
 return value decides what the engine does with that key.
 
@@ -12,7 +12,7 @@ return value decides what the engine does with that key.
      NOTE: the MAX_BACKSPACES clamp cannot be exercised on the *production*
      dll without really sending keys; it is checked against the dry-run dll in
      scenario F and statically with objdump (cmp $0x2710).
-  4. revert.lua with press_backspace STUBBED, so no keystroke is ever injected:
+  4. actions.lua with press_backspace STUBBED, so no keystroke is ever injected:
         A. no schema config      -> defaults (text trigger "qq/", stack 50, max 500)
                                     and the engine feeds keys into the mock
                                     composition, exactly like Rime would
@@ -25,7 +25,7 @@ return value decides what the engine does with that key.
                                     open the hotkey is refused (documented)
         E. config: wrong dll_dir -> graceful failure, nothing injected
   5. F. end-to-end async path, using a second dll compiled with
-     -DSENDKEYCODE_DRY_RUN: send_batch() counts the key events it *would* send
+     -DACTIONS_DRY_RUN: send_batch() counts the key events it *would* send
      instead of calling SendInput. This verifies, without touching the keyboard:
         - the trigger key returns immediately (returns the accepted count)
         - the background thread fires ~FIRE_DELAY_MS later, in batches
@@ -44,10 +44,9 @@ import sys
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-BASE = os.environ.get("REVERT_ROOT", os.path.dirname(_HERE))
-MINGW_BIN = os.environ.get("MINGW_BIN", r"C:\msys64\mingw64\bin")
-WEASEL_DIR = os.environ.get("WEASEL_DIR", r"C:\Program Files\Rime\weasel-0.17.4")
+BASE = r"C:\Users\Administrator\Desktop\Ai_Work\DSH_harness\backspace-build"
+MINGW_BIN = r"C:\msys64\mingw64\bin"
+WEASEL_DIR = r"C:\Program Files\Rime\weasel-0.17.4"
 
 # Optional argv[1]: path of any other rime.dll, to test whether an upgraded
 # Rime still provides the Lua 5.4 ABI this module was built against.
@@ -55,21 +54,21 @@ WEASEL_DIR = os.environ.get("WEASEL_DIR", r"C:\Program Files\Rime\weasel-0.17.4"
 RIME = sys.argv[1] if len(sys.argv) > 1 else os.path.join(WEASEL_DIR, "rime.dll")
 USERDIR_ON_DISK = os.path.join(BASE, "_testdata", "userdir")
 USERDIR_DRY = os.path.join(BASE, "_testdata", "dryrun", "userdir")
-DLL_REL_DIR = "lua/wanxiang/ziji/sendKeyCode"
-DLL_DIR = os.path.join(USERDIR_ON_DISK, "lua", "wanxiang", "ziji", "sendKeyCode")
-DLL_DIR_DRY = os.path.join(USERDIR_DRY, "lua", "wanxiang", "ziji", "sendKeyCode")
+DLL_REL_DIR = "lua/wanxiang/ziji"
+DLL_DIR = os.path.join(USERDIR_ON_DISK, "lua", "wanxiang", "ziji")
+DLL_DIR_DRY = os.path.join(USERDIR_DRY, "lua", "wanxiang", "ziji")
 
 
 def build_dry_run_dll():
     """Compile the counting-only dll used by scenario F."""
     os.makedirs(DLL_DIR_DRY, exist_ok=True)
-    out = os.path.join(DLL_DIR_DRY, "sendKeyCode.dll")
+    out = os.path.join(DLL_DIR_DRY, "actions.dll")
     env = dict(os.environ)
     env["PATH"] = MINGW_BIN + ";" + env["PATH"]
     cmd = [
         os.path.join(MINGW_BIN, "gcc.exe"), "-shared", "-fPIC",
-        "-DSENDKEYCODE_DRY_RUN", "-o", out, "sendKeyCode.c",
-        "-Iinclude", "-L" + WEASEL_DIR, "-luser32", "-lrime", "-lshell32", "-O2",
+        "-DACTIONS_DRY_RUN", "-o", out, "actions.c",
+        "-Iinclude", "-L" + WEASEL_DIR, "-luser32", "-lrime", "-lshell32", "-lwinhttp", "-O2",
         "-Wl,--no-insert-timestamp",
     ]
     proc = subprocess.run(cmd, cwd=BASE, env=env, capture_output=True, text=True)
@@ -82,14 +81,8 @@ def build_dry_run_dll():
 
 def prepare_fake_userdir():
     os.makedirs(DLL_DIR, exist_ok=True)
-    src = os.path.join(BASE, "sendKeyCode.dll")
-    if not os.path.exists(src):
-        # 这个仓库不随源码放二进制：用刚编出来的 dry-run dll 顶替。
-        # 场景 E 只用它试"dll_dir 写错时能否优雅失败"，不真的发键，够用。
-        src = os.path.join(DLL_DIR_DRY, "sendKeyCode.dll")
-        print("note: no production sendKeyCode.dll in repo root,"
-              " using the dry-run build for scenario E")
-    shutil.copy2(src, os.path.join(DLL_DIR, "sendKeyCode.dll"))
+    shutil.copy2(os.path.join(BASE, "actions.dll"),
+                 os.path.join(DLL_DIR, "actions.dll"))
 
 
 LUA_SRC = r"""
@@ -101,7 +94,7 @@ log = {
   error = function(m) logs[#logs + 1] = "error: " .. tostring(m) end,
 }
 
--- keep the real clock for busy-waiting, then fake os.clock so revert.lua's
+-- keep the real clock for busy-waiting, then fake os.clock so actions.lua's
 -- own debounce never blocks a test trigger
 local real_clock = os.clock
 local function sleep_ms(ms)
@@ -120,7 +113,7 @@ local function log_has(pattern)
 end
 
 -- ============ load the real component ============
-local revert = assert(loadfile(REVERT_PATH))()
+local revert = assert(loadfile(ACTIONS_PATH))()
 rec("chunk_loaded", type(revert) == "table")
 rec("has_init", type(revert.init))
 rec("has_func", type(revert.func))
@@ -131,6 +124,13 @@ local function new_env(config)
   local ctx = { input = "", cleared = 0 }
   ctx.clear = function(self) self.cleared = self.cleared + 1; self.input = "" end
   ctx.is_composing = function(self) return #(self.input or "") > 0 end
+  ctx.pop_input = function(self, n)
+    n = n or 1
+    local len = #(self.input or "")
+    if n > len then n = len end
+    self.input = self.input:sub(1, len - n)
+    self.popped = (self.popped or 0) + n
+  end
   ctx.commit_notifier = {
     connect = function(self, fn)
       ctx.fn = fn
@@ -186,7 +186,7 @@ end
 local envA, ctxA = new_env(nil)
 revert.init(envA)
 
-local mod = package.loaded["sendKeyCode"]
+local mod = package.loaded["actions"]
 rec("A_module", type(mod))
 rec("A_press_backspace", mod and type(mod.press_backspace))
 rec("A_press_ctrl_z", tostring(mod and mod.press_ctrl_z))
@@ -230,15 +230,15 @@ revert.fini(envA)
 rec("A_disconnected", tostring(ctxA.disconnected == true))
 
 -- =====================================================================
--- B. config: trigger + stack_size   (revert/trigger, revert/stack_size)
+-- B. config: trigger + stack_size   (actions/trigger, actions/stack_size)
 -- =====================================================================
 local cfgB = {
   values = {
-    ["revert/trigger"] = "q/",
-    ["revert/dll_dir"] = DLLREL,
-    ["revert/stack_size"] = 3,
-    ["revert/max_backspaces"] = 100,
-    ["revert/debounce_ms"] = 0,
+    ["actions/trigger"] = "q/",
+    ["actions/dll_dir"] = DLLREL,
+    ["actions/stack_size"] = 3,
+    ["actions/max_backspaces"] = 100,
+    ["actions/debounce_ms"] = 0,
   },
 }
 cfgB.get_string = function(self, k) return self.values[k] end
@@ -272,11 +272,11 @@ revert.fini(envB)
 -- =====================================================================
 local cfgC = {
   values = {
-    ["revert/trigger"] = "qq/",
-    ["revert/dll_dir"] = DLLREL,
-    ["revert/stack_size"] = 50,
-    ["revert/max_backspaces"] = 2,
-    ["revert/debounce_ms"] = 0,
+    ["actions/trigger"] = "qq/",
+    ["actions/dll_dir"] = DLLREL,
+    ["actions/stack_size"] = 50,
+    ["actions/max_backspaces"] = 2,
+    ["actions/debounce_ms"] = 0,
   },
 }
 cfgC.get_string = function(self, k) return self.values[k] end
@@ -297,9 +297,9 @@ rec("C_log_has_truncated", tostring(log_has("truncated to max_backspaces=2")))
 -- =====================================================================
 local cfgD = {
   values = {
-    ["revert/stack_size"] = -3,
-    ["revert/max_backspaces"] = 999999,
-    ["revert/debounce_ms"] = -1,
+    ["actions/stack_size"] = -3,
+    ["actions/max_backspaces"] = 999999,
+    ["actions/debounce_ms"] = -1,
   },
 }
 cfgD.get_string = function(self, k) return self.values[k] end
@@ -317,12 +317,12 @@ rec("D_clamped", tostring(log_has("stack_size=1") and log_has("max_backspaces=10
 logs = {}
 local cfgG = {
   values = {
-    ["revert/hotkey"] = "Control+slash",
-    ["revert/trigger"] = "qq/",
-    ["revert/dll_dir"] = DLLREL,
-    ["revert/stack_size"] = 50,
-    ["revert/max_backspaces"] = 500,
-    ["revert/debounce_ms"] = 0,
+    ["actions/hotkey"] = "Control+slash",
+    ["actions/trigger"] = "qq/",
+    ["actions/dll_dir"] = DLLREL,
+    ["actions/stack_size"] = 50,
+    ["actions/max_backspaces"] = 500,
+    ["actions/debounce_ms"] = 0,
   },
 }
 cfgG.get_string = function(self, k) return self.values[k] end
@@ -357,14 +357,14 @@ rec("G_composing_ignored", tostring(#injected == n_before))
 rec("G_log_has_composing", tostring(log_has("hotkey ignored while composing")))
 revert.fini(envG)
 
--- G3: revert/trigger = "none" turns the text trigger off (hotkey only)
+-- G3: actions/trigger = "none" turns the text trigger off (hotkey only)
 logs = {}
 local cfgG3 = {
   values = {
-    ["revert/hotkey"] = "Control+slash",
-    ["revert/trigger"] = "none",
-    ["revert/dll_dir"] = DLLREL,
-    ["revert/debounce_ms"] = 0,
+    ["actions/hotkey"] = "Control+slash",
+    ["actions/trigger"] = "none",
+    ["actions/dll_dir"] = DLLREL,
+    ["actions/debounce_ms"] = 0,
   },
 }
 cfgG3.get_string = function(self, k) return self.values[k] end
@@ -387,9 +387,9 @@ revert.fini(envG3)
 -- G2: the one-character spelling "Ctrl+/" parses to the same thing
 local cfgG2 = {
   values = {
-    ["revert/hotkey"] = "Ctrl+/",
-    ["revert/dll_dir"] = DLLREL,
-    ["revert/debounce_ms"] = 0,
+    ["actions/hotkey"] = "Ctrl+/",
+    ["actions/dll_dir"] = DLLREL,
+    ["actions/debounce_ms"] = 0,
   },
 }
 cfgG2.get_string = function(self, k) return self.values[k] end
@@ -405,12 +405,14 @@ rec("G2_injected", table.concat(injected, ","))
 revert.fini(envG2)
 
 -- =====================================================================
--- H. shortcuts: revert/shortcuts -> press_keys / @to-symbol / @delete
+-- H. shortcuts: actions/shortcuts -> press_keys / @to-symbol / @delete
 -- =====================================================================
 local function cfg_plain(values)
   local c = { values = values }
   c.get_string = function(self, k) return self.values[k] end
   c.get_int = function(self, k) return self.values[k] end
+  c.get_bool = function(self, k) return self.values[k] end
+  c.get_double = function(self, k) return self.values[k] end
   return c
 end
 
@@ -437,13 +439,13 @@ end
 
 logs = {}
 local cfgH = cfg_plain({
-  ["revert/trigger"]        = "qq/",
-  ["revert/shortcuts"]      = "@defaults pq;=@delete",
-  ["revert/symbols"]        = "，。！？；：、,.!?;:",
-  ["revert/dll_dir"]        = DLLREL,
-  ["revert/stack_size"]     = 14,
-  ["revert/max_backspaces"] = 500,
-  ["revert/debounce_ms"]    = 0,
+  ["actions/trigger"]        = "qq/",
+  ["actions/shortcuts"]      = "@defaults pq;=@delete",
+  ["actions/symbols"]        = "，。！？；：、,.!?;:",
+  ["actions/dll_dir"]        = DLLREL,
+  ["actions/stack_size"]     = 14,
+  ["actions/max_backspaces"] = 500,
+  ["actions/debounce_ms"]    = 0,
 })
 local envH, ctxH = new_env(cfgH)
 revert.init(envH)
@@ -573,12 +575,12 @@ revert.fini(envH)
 -- H2: @to-symbol-include / 多步序列 / @delete
 logs = {}
 local cfgH2 = cfg_plain({
-  ["revert/trigger"]        = "qq/",
-  ["revert/shortcuts"]      = "pp;=@to-symbol-include sm;=shift+home-shift+left dq;=@delete",
-  ["revert/symbols"]        = "，。",
-  ["revert/dll_dir"]        = DLLREL,
-  ["revert/max_backspaces"] = 500,
-  ["revert/debounce_ms"]    = 0,
+  ["actions/trigger"]        = "qq/",
+  ["actions/shortcuts"]      = "pp;=@to-symbol-include sm;=shift+home-shift+left dq;=@delete",
+  ["actions/symbols"]        = "，。",
+  ["actions/dll_dir"]        = DLLREL,
+  ["actions/max_backspaces"] = 500,
+  ["actions/debounce_ms"]    = 0,
 })
 local envH2, ctxH2 = new_env(cfgH2)
 revert.init(envH2)
@@ -603,15 +605,15 @@ revert.fini(envH2)
 -- H3: 配置写错的六种情况，每一项都要报错且不生效
 logs = {}
 local cfgH3 = cfg_plain({
-  ["revert/trigger"]     = "qq/",
-  ["revert/shortcuts"]   = "zz;=ctrl+z zz;=ctrl+y qq/=ctrl+a z=ctrl+b zz2;=@nope zz3;=ctrl+nope bareword",
-  ["revert/dll_dir"]     = DLLREL,
-  ["revert/debounce_ms"] = 0,
+  ["actions/trigger"]     = "qq/",
+  ["actions/shortcuts"]   = "zz;=ctrl+z zz;=ctrl+y qq/=ctrl+a z=ctrl+b zz2;=@nope zz3;=ctrl+nope bareword",
+  ["actions/dll_dir"]     = DLLREL,
+  ["actions/debounce_ms"] = 0,
 })
 local envH3, ctxH3 = new_env(cfgH3)
 revert.init(envH3)
 rec("H3_dup_log", tostring(log_has("duplicate shortcut trigger disabled: zz;")))
-rec("H3_same_log", tostring(log_has("shortcut trigger equals revert/trigger, disabled: qq/")))
+rec("H3_same_log", tostring(log_has("shortcut trigger equals actions/trigger, disabled: qq/")))
 rec("H3_short_log", tostring(log_has("shortcut trigger too short")))
 rec("H3_unknown_log", tostring(log_has("unknown built-in action disabled: @nope")))
 rec("H3_badseq_log", tostring(log_has("bad key sequence disabled: trigger=zz3;")))
@@ -624,9 +626,9 @@ revert.fini(envH3)
 -- H4/H5: @defaults 与混写
 logs = {}
 local cfgH4 = cfg_plain({
-  ["revert/shortcuts"]   = "@defaults xy;=ctrl+shift+right",
-  ["revert/dll_dir"]     = DLLREL,
-  ["revert/debounce_ms"] = 0,
+  ["actions/shortcuts"]   = "@defaults xy;=ctrl+shift+right",
+  ["actions/dll_dir"]     = DLLREL,
+  ["actions/debounce_ms"] = 0,
 })
 local envH4 = new_env(cfgH4)
 revert.init(envH4)
@@ -635,23 +637,23 @@ revert.fini(envH4)
 
 logs = {}
 local cfgH5 = cfg_plain({
-  ["revert/shortcuts"]   = "@defaults",
-  ["revert/dll_dir"]     = DLLREL,
-  ["revert/debounce_ms"] = 0,
+  ["actions/shortcuts"]   = "@defaults",
+  ["actions/dll_dir"]     = DLLREL,
+  ["actions/debounce_ms"] = 0,
 })
 local envH5 = new_env(cfgH5)
 revert.init(envH5)
 rec("H5_count", count_shortcuts())
 revert.fini(envH5)
 
--- H6: 自定义搜索地址模板（revert/search_url 可配置）
+-- H6: 自定义搜索地址模板（actions/search_url 可配置）
 logs = {}
 local cfgH6 = cfg_plain({
-  ["revert/trigger"]     = "qq/",
-  ["revert/shortcuts"]   = "f;=@search",
-  ["revert/search_url"]  = "https://www.bing.com/search?q=%s",
-  ["revert/dll_dir"]     = DLLREL,
-  ["revert/debounce_ms"] = 0,
+  ["actions/trigger"]     = "qq/",
+  ["actions/shortcuts"]   = "f;=@search",
+  ["actions/search_url"]  = "https://www.bing.com/search?q=%s",
+  ["actions/dll_dir"]     = DLLREL,
+  ["actions/debounce_ms"] = 0,
 })
 local envH6, ctxH6 = new_env(cfgH6)
 revert.init(envH6)
@@ -671,13 +673,13 @@ rec("H7_search_log", tostring(log_has("nothing to search")))
 revert.fini(envH6)
 revert.fini(envH7)
 
--- H8: 按键间隔 revert/key_gap_ms（默认 30；可配；超上限截到 500）
+-- H8: 按键间隔 actions/key_gap_ms（默认 30；可配；超上限截到 500）
 logs = {}
 local cfgH8 = cfg_plain({
-  ["revert/shortcuts"]   = "z;=ctrl+z  hh;=shift+home-ctrl+c",
-  ["revert/key_gap_ms"]  = 120,
-  ["revert/dll_dir"]     = DLLREL,
-  ["revert/debounce_ms"] = 0,
+  ["actions/shortcuts"]   = "z;=ctrl+z  hh;=shift+home-ctrl+c",
+  ["actions/key_gap_ms"]  = 120,
+  ["actions/dll_dir"]     = DLLREL,
+  ["actions/debounce_ms"] = 0,
 })
 local envH8, ctxH8 = new_env(cfgH8)
 revert.init(envH8)
@@ -693,10 +695,10 @@ revert.fini(envH8)
 
 logs = {}
 local cfgH8b = cfg_plain({
-  ["revert/shortcuts"]   = "z;=ctrl+z",
-  ["revert/key_gap_ms"]  = 5000,
-  ["revert/dll_dir"]     = DLLREL,
-  ["revert/debounce_ms"] = 0,
+  ["actions/shortcuts"]   = "z;=ctrl+z",
+  ["actions/key_gap_ms"]  = 5000,
+  ["actions/dll_dir"]     = DLLREL,
+  ["actions/debounce_ms"] = 0,
 })
 local envH8b, ctxH8b = new_env(cfgH8b)
 revert.init(envH8b)
@@ -707,12 +709,391 @@ rec("H8b_gap_capped", tostring(keysent_gap[1]))
 revert.fini(envH8b)
 
 -- =====================================================================
+-- I. AI 模式：@ai 触发码 / 取文 / 发送 / 结果插入 / Esc / replace
+-- =====================================================================
+local requests, sends, nudges = {}, {}, {}
+local req_seq, req_state, result_body, result_err, cancels = 0, "idle", "", nil, 0
+
+mod.http_request = function(url, body, headers)
+  requests[#requests + 1] = { url = url, body = body, headers = headers }
+  req_seq = req_seq + 1
+  req_state = "running"
+  return req_seq
+end
+mod.http_state = function() return req_state, req_seq end
+mod.http_result = function()
+  req_state = "idle"
+  if result_err then
+    local e = result_err
+    result_err = nil
+    return nil, e
+  end
+  return result_body, nil
+end
+mod.http_cancel = function() cancels = cancels + 1; req_state = "idle"; return 1 end
+mod.send_text = function(text) sends[#sends + 1] = text; return 1 end
+mod.nudge = function(delay, vk)
+  nudges[#nudges + 1] = tostring(delay) .. "/" .. tostring(vk)
+  return 1
+end
+
+-- I0: 没开 actions/ai/enabled 时 ai; 不生效
+logs = {}
+local cfgI0 = cfg_plain({
+  ["actions/shortcuts"]   = "ai;=@ai",
+  ["actions/dll_dir"]     = DLLREL,
+  ["actions/debounce_ms"] = 0,
+})
+local envI0, ctxI0 = new_env(cfgI0)
+revert.init(envI0)
+rec("I0_log_ai", tostring(last_log():match("ai=(%a+)")))
+rec("I0_flag", tostring(envI0.ai_enabled))
+rec("I0_ret", type_text(revert, envI0, ctxI0, "ai;"))
+rec("I0_mode", tostring(envI0.ai_mode))
+rec("I0_log_ignored", tostring(log_has("ai shortcut ignored")))
+revert.fini(envI0)
+
+-- I1: 打开 AI -> 进模式 -> 上屏 -> 连按两次 / 发送
+logs = {}
+local cfgI = cfg_plain({
+  ["actions/trigger"]              = "qq/",
+  ["actions/shortcuts"]            = "ai;=@ai eng;=@ai:eng",
+  ["actions/dll_dir"]              = DLLREL,
+  ["actions/debounce_ms"]          = 0,
+  ["actions/ai/enabled"]           = true,
+  ["actions/ai/online/base_url"]   = "https://example.test/v1/chat/completions",
+  ["actions/ai/online/model"]      = "test-model",
+  ["actions/ai/online/api_key"]    = "sk-test",
+  ["actions/ai/online/max_tokens"] = 128,
+  ["actions/ai/prompts/eng"]       = "CUSTOM-ENG-PROMPT",
+})
+local envI, ctxI = new_env(cfgI)
+revert.init(envI)
+rec("I1_log_ai", tostring(last_log():match("ai=(%a+)")))
+rec("I1_flag", tostring(envI.ai_enabled))
+rec("I1_double_ms", tostring(envI.ai_double_ms))
+rec("I1_send_code", tostring(envI.ai_send and envI.ai_send.code))
+rec("I1_prompt_eng", tostring(envI.ai_prompts.eng))
+rec("I1_enter_ret", type_text(revert, envI, ctxI, "ai;"))
+rec("I1_mode", tostring(envI.ai_mode and envI.ai_mode.prompt))
+rec("I1_log_mode_on", tostring(log_has("mode on (default)")))
+
+commit(ctxI, "\u{4eca}\u{5929}\u{5929}\u{6c14}\u{5f88}\u{597d}\u{3002}\u{6211}\u{51fa}\u{95e8}\u{4e86}")
+requests, sends, nudges = {}, {}, {}
+rec("I1_press1", tostring(feed(revert, envI, ctxI, key(0x2F))))
+rec("I1_press2", tostring(feed(revert, envI, ctxI, key(0x2F))))
+rec("I1_req_count", tostring(#requests))
+rec("I1_req_url", requests[1] and requests[1].url or "-")
+rec("I1_req_model", requests[1] and (requests[1].body:match('"model":"([^"]*)"') or "-") or "-")
+rec("I1_req_user",
+    requests[1] and (requests[1].body:match('"role":"user","content":"([^"]*)"') or "-") or "-")
+rec("I1_req_auth",
+    requests[1] and (requests[1].headers:find("Bearer sk-test", 1, true) and "yes" or "no") or "-")
+rec("I1_req_tokens", requests[1] and (requests[1].body:match('"max_tokens":(%d+)') or "-") or "-")
+rec("I1_nudge", table.concat(nudges, ","))
+rec("I1_log_sent", tostring(log_has("ai: sent")))
+
+-- 上一个还没回来时再连按两次：不发第二个，只记一条日志
+-- （测试里的 os.clock 每次调用前进 1 秒，等请求在跑时一次按键要花两次，所以把窗口放宽）
+envI.ai_double_ms = 5000
+envI.ai_last_push = os.clock() - 5
+local logs_before = #logs
+feed(revert, envI, ctxI, key(0x2F))
+rec("I1_busy_ret", tostring(feed(revert, envI, ctxI, key(0x2F))))
+rec("I1_busy_reqs", tostring(#requests))
+rec("I1_busy_newlogs", tostring(#logs - logs_before))
+rec("I1_busy_last", last_log())
+envI.ai_double_ms = 1000
+
+-- I2: 结果回来 -> 叫醒键取回 -> send_text 打进光标 -> 记账
+req_state = "done"
+result_body = '{"choices":[{"message":{"content":"\u{6211}\u{51fa}\u{95e8}\u{4e86}\u{ff0c}\u{5929}\u{6c14}\u{5f88}\u{597d}\u{3002}"}}]}'
+sends, nudges, injected = {}, {}, {}
+local stack_before = #envI.revert_stack
+rec("I2_take_ret", tostring(feed(revert, envI, ctxI, key(0x87))))
+rec("I2_send_text", table.concat(sends, "|"))
+rec("I2_stack_delta", tostring(#envI.revert_stack - stack_before))
+rec("I2_stack_ai", tostring((envI.revert_stack[#envI.revert_stack] or {}).ai == true))
+rec("I2_log_inserted", tostring(log_has("ai: inserted")))
+rec("I2_injected", table.concat(injected, ","))
+
+-- I3: replace=true 且原文在同一行 -> 先删原文再打字
+logs = {}
+local cfgI3 = cfg_plain({
+  ["actions/shortcuts"]       = "ai;=@ai",
+  ["actions/dll_dir"]         = DLLREL,
+  ["actions/debounce_ms"]     = 0,
+  ["actions/ai/enabled"]      = true,
+  ["actions/ai/replace"]      = true,
+  ["actions/ai/source"]       = "committed",
+  ["actions/ai/online/model"] = "m",
+})
+local envI3, ctxI3 = new_env(cfgI3)
+revert.init(envI3)
+rec("I3_enter", type_text(revert, envI3, ctxI3, "ai;"))
+commit(ctxI3, "\u{4e00}\u{4e8c}\u{4e09}")
+req_state = "idle"
+envI3.ai_last_push = os.clock()
+requests, sends = {}, {}
+feed(revert, envI3, ctxI3, key(0x2F))
+req_state = "done"
+result_body = '{"choices":[{"message":{"content":"XYZ"}}]}'
+injected = {}
+feed(revert, envI3, ctxI3, key(0x87))
+rec("I3_reqs", tostring(#requests))
+rec("I3_injected", table.concat(injected, ","))
+rec("I3_send_text", table.concat(sends, "|"))
+
+-- I4: replace=true 但原文跨行 -> 一句都不删
+commit(ctxI3, "\u{7b2c}\u{4e00}\u{884c}\n\u{7b2c}\u{4e8c}\u{884c}")
+envI3.ai_last_push = os.clock()
+requests, sends = {}, {}
+feed(revert, envI3, ctxI3, key(0x2F))
+req_state = "done"
+result_body = '{"choices":[{"message":{"content":"XYZ"}}]}'
+injected = {}
+feed(revert, envI3, ctxI3, key(0x87))
+rec("I4_injected", "[" .. table.concat(injected, ",") .. "]")
+rec("I4_send_text", table.concat(sends, "|"))
+
+-- I5: 后台报错 -> 只记日志，不插入
+logs = {}
+commit(ctxI3, "\u{4e00}")
+envI3.ai_last_push = os.clock()
+sends = {}
+feed(revert, envI3, ctxI3, key(0x2F))
+req_state = "done"
+result_err = "HTTP 500"
+injected = {}
+feed(revert, envI3, ctxI3, key(0x87))
+rec("I5_log_failed", tostring(log_has("ai: request failed - HTTP 500")))
+rec("I5_send_text", "[" .. table.concat(sends, "|") .. "]")
+
+-- I6: Esc 取消本次；再按一次退出 AI 模式
+logs = {}
+commit(ctxI3, "\u{4e00}")
+envI3.ai_last_push = os.clock()
+feed(revert, envI3, ctxI3, key(0x2F))
+local cancels_before = cancels
+rec("I6_esc_ret", tostring(feed(revert, envI3, ctxI3, key(0xFF1B))))
+rec("I6_cancels", tostring(cancels - cancels_before))
+rec("I6_log_cancel", tostring(log_has("cancelled by Esc")))
+rec("I6_esc2_ret", tostring(feed(revert, envI3, ctxI3, key(0xFF1B))))
+rec("I6_mode_after", tostring(envI3.ai_mode))
+revert.fini(envI3)
+
+-- I7: source=composition -> 发输入框里还没上屏的编码，发完清掉
+logs = {}
+local cfgI7 = cfg_plain({
+  ["actions/shortcuts"]       = "ai;=@ai",
+  ["actions/dll_dir"]         = DLLREL,
+  ["actions/debounce_ms"]     = 0,
+  ["actions/ai/enabled"]      = true,
+  ["actions/ai/source"]       = "composition",
+  ["actions/ai/online/model"] = "m",
+})
+local envI7, ctxI7 = new_env(cfgI7)
+revert.init(envI7)
+type_text(revert, envI7, ctxI7, "ai;")
+for _, ch in ipairs({ "n", "i", "h", "a", "o" }) do
+  feed(revert, envI7, ctxI7, key(ch:byte()))
+end
+rec("I7_input", ctxI7.input)
+requests = {}
+envI7.ai_last_push = os.clock()
+feed(revert, envI7, ctxI7, key(0x2F))
+rec("I7_req_user",
+    requests[1] and (requests[1].body:match('"role":"user","content":"([^"]*)"') or "-") or "-")
+rec("I7_input_after", "[" .. ctxI7.input .. "]")
+revert.fini(envI7)
+
+-- I8: 发送键写成组合键（ctrl+enter 按一次就发）
+logs = {}
+local cfgI8 = cfg_plain({
+  ["actions/shortcuts"]       = "ai;=@ai",
+  ["actions/dll_dir"]         = DLLREL,
+  ["actions/debounce_ms"]     = 0,
+  ["actions/ai/enabled"]      = true,
+  ["actions/ai/send_key"]     = "ctrl+enter",
+  ["actions/ai/online/model"] = "m",
+})
+local envI8, ctxI8 = new_env(cfgI8)
+revert.init(envI8)
+rec("I8_combo", tostring(envI8.ai_send and envI8.ai_send.combo ~= nil))
+type_text(revert, envI8, ctxI8, "ai;")
+commit(ctxI8, "\u{6c49}\u{5b57}")
+requests = {}
+rec("I8_ret", tostring(feed(revert, envI8, ctxI8, key(0x0D, { ctrl = true }))))
+rec("I8_reqs", tostring(#requests))
+revert.fini(envI8)
+
+-- I9: 发送键写错 -> 整个 AI 功能关掉并报错
+logs = {}
+local cfgI9 = cfg_plain({
+  ["actions/shortcuts"]       = "ai;=@ai",
+  ["actions/dll_dir"]         = DLLREL,
+  ["actions/debounce_ms"]     = 0,
+  ["actions/ai/enabled"]      = true,
+  ["actions/ai/send_key"]     = "nonesuch",
+  ["actions/ai/online/model"] = "m",
+})
+local envI9 = new_env(cfgI9)
+revert.init(envI9)
+rec("I9_flag", tostring(envI9.ai_enabled))
+rec("I9_log", tostring(log_has("cannot parse actions/ai/send_key")))
+revert.fini(envI9)
+
+-- I10: dll 是旧版（没有 http_request）-> AI 自动关掉，其他功能照常
+logs = {}
+local saved_request = mod.http_request
+mod.http_request = nil
+local envI10 = new_env(cfgI)
+revert.init(envI10)
+rec("I10_flag", tostring(envI10.ai_enabled))
+rec("I10_log", tostring(log_has("ai disabled - dll")))
+mod.http_request = saved_request
+revert.fini(envI10)
+
+-- I11: eng 模式用自己那条提示词；切模式后 prompt 变了
+logs = {}
+type_text(revert, envI, ctxI, "eng;")
+rec("I11_mode", tostring(envI.ai_mode and envI.ai_mode.prompt))
+commit(ctxI, "abc")
+requests = {}
+envI.ai_last_push = os.clock()
+feed(revert, envI, ctxI, key(0x2F))
+rec("I11_system",
+    requests[1] and (requests[1].body:match('"role":"system","content":"([^"]*)"') or "-") or "-")
+rec("I11_log_prompt", tostring(last_log():match("prompt=(%w+)")))
+
+-- I12: 没有任何可发的内容 -> 只记日志
+logs = {}
+local envI12, ctxI12 = new_env(cfgI)
+revert.init(envI12)
+type_text(revert, envI12, ctxI12, "ai;")
+requests = {}
+envI12.ai_last_push = os.clock()
+feed(revert, envI12, ctxI12, key(0x2F))
+rec("I12_reqs", tostring(#requests))
+rec("I12_log", tostring(log_has("nothing to send")))
+revert.fini(envI12)
+
+-- I13: 末尾那串标点不算 -> 取"上一段"和它后面到末尾标点之间的内容
+local function sentence_of(cfg_extra, history, opts)
+  local c = cfg_plain({
+    ["actions/trigger"]              = "qq/",
+    ["actions/shortcuts"]            = "ai;=@ai",
+    ["actions/dll_dir"]              = DLLREL,
+    ["actions/debounce_ms"]          = 0,
+    ["actions/ai/enabled"]           = true,
+    ["actions/ai/online/base_url"]   = "https://example.test/v1/chat/completions",
+    ["actions/ai/online/model"]      = "test-model",
+    ["actions/ai/online/api_key"]    = "sk-test",
+  })
+  for k, v in pairs(cfg_extra or {}) do c.values[k] = v end
+  local env, ctx = new_env(c)
+  revert.init(env)
+  type_text(revert, env, ctx, "ai;")
+  commit(ctx, history)
+  requests, nudges = {}, {}
+  env.ai_last_push = os.clock()
+  feed(revert, env, ctx, key(0x2F))
+  local user = requests[1] and (requests[1].body:match('"role":"user","content":"([^"]*)"') or "-") or "-"
+  revert.fini(env)
+  return user
+end
+
+rec("I13_trailing_marks",
+    sentence_of({}, "\u{4eca}\u{5929}\u{5929}\u{6c14}\u{5f88}\u{597d}\u{3002}\u{6211}\u{51fa}\u{95e8}\u{4e86}\u{ff0c}\u{3002}"))
+rec("I13_marks_between",
+    sentence_of({}, "\u{4f60}\u{597d}\u{3002}\u{ff01}\u{ff1f}\u{6211}\u{56de}\u{6765}\u{4e86}"))
+rec("I13_only_marks",
+    sentence_of({}, "\u{3002}\u{ff01}\u{ff1f}"))
+rec("I13_include_marks",
+    sentence_of({["actions/ai/include_marks"] = true},
+                "\u{4eca}\u{5929}\u{5929}\u{6c14}\u{5f88}\u{597d}\u{3002}\u{6211}\u{51fa}\u{95e8}\u{4e86}\u{ff0c}\u{3002}"))
+
+-- I14: replace=true 时删到"上一组符号"之后（句子 + 末尾那串符号一起删）
+local cfgI14 = cfg_plain({
+  ["actions/shortcuts"]       = "ai;=@ai",
+  ["actions/dll_dir"]         = DLLREL,
+  ["actions/debounce_ms"]     = 0,
+  ["actions/ai/enabled"]      = true,
+  ["actions/ai/replace"]      = true,
+  ["actions/ai/source"]       = "committed",
+  ["actions/ai/online/model"] = "m",
+})
+local envI14, ctxI14 = new_env(cfgI14)
+revert.init(envI14)
+type_text(revert, envI14, ctxI14, "ai;")
+commit(ctxI14, "\u{4eca}\u{5929}\u{5929}\u{6c14}\u{5f88}\u{597d}\u{3002}\u{6211}\u{51fa}\u{95e8}\u{4e86}\u{ff0c}\u{3002}")
+req_state = "idle"
+envI14.ai_last_push = os.clock()
+requests, sends = {}, {}
+feed(revert, envI14, ctxI14, key(0x2F))
+req_state = "done"
+result_body = '{"choices":[{"message":{"content":"XYZ"}}]}'
+injected = {}
+feed(revert, envI14, ctxI14, key(0x87))
+rec("I14_reqs", tostring(#requests))
+rec("I14_injected", table.concat(injected, ","))
+rec("I14_send_text", table.concat(sends, "|"))
+revert.fini(envI14)
+
+-- I15: 有编码时第一下 / 放行（万象快符靠这一下），第二下才发送并把那个字符摘掉
+local cfgI15 = cfg_plain({
+  ["actions/shortcuts"]       = "ai;=@ai",
+  ["actions/dll_dir"]         = DLLREL,
+  ["actions/debounce_ms"]     = 0,
+  ["actions/ai/enabled"]      = true,
+  ["actions/ai/double_ms"]    = 5000,
+  ["actions/ai/online/model"] = "m",
+})
+local envI15, ctxI15 = new_env(cfgI15)
+revert.init(envI15)
+type_text(revert, envI15, ctxI15, "ai;")
+requests = {}
+ctxI15.input = "nihao"
+rec("I15_pass", tostring(feed(revert, envI15, ctxI15, key(0x2F))))
+rec("I15_reqs", tostring(#requests))
+ctxI15.input = "nihao/"
+rec("I15_second", tostring(feed(revert, envI15, ctxI15, key(0x2F))))
+rec("I15_popped", tostring(ctxI15.popped or 0))
+rec("I15_reqs2", tostring(#requests))
+rec("I15_body_has", requests[1] and (requests[1].body:find("nihao", 1, true) and "yes" or "no") or "-")
+revert.fini(envI15)
+
+-- I15b: 刚上屏的只是符号（没有汉字）-> 不发送
+local cfgI15b = cfg_plain({
+  ["actions/shortcuts"]       = "ai;=@ai",
+  ["actions/dll_dir"]         = DLLREL,
+  ["actions/debounce_ms"]     = 0,
+  ["actions/ai/enabled"]      = true,
+  ["actions/ai/source"]       = "committed",
+  ["actions/ai/double_ms"]    = 5000,
+  ["actions/ai/online/model"] = "m",
+})
+local envI15b, ctxI15b = new_env(cfgI15b)
+revert.init(envI15b)
+type_text(revert, envI15b, ctxI15b, "ai;")
+logs = {}
+requests = {}
+commit(ctxI15b, "\u{ff08}\u{ff09}")
+envI15b.ai_last_push = os.clock()
+rec("I15b_first", tostring(feed(revert, envI15b, ctxI15b, key(0x2F))))
+feed(revert, envI15b, ctxI15b, key(0x2F))
+rec("I15b_reqs", tostring(#requests))
+rec("I15b_log_no_cjk", tostring(log_has("nothing to send")))
+revert.fini(envI15b)
+revert.fini(envI)
+
+-- =====================================================================
 -- E. config: wrong dll_dir -> graceful failure, nothing injected
 -- =====================================================================
 local cfgE = {
   values = {
-    ["revert/trigger"] = "qq/",
-    ["revert/dll_dir"] = "lua/does/not/exist",
+    ["actions/trigger"] = "qq/",
+    ["actions/dll_dir"] = "lua/does/not/exist",
   },
 }
 cfgE.get_string = function(self, k) return self.values[k] end
@@ -720,7 +1101,7 @@ cfgE.get_int = function(self, k) return self.values[k] end
 
 -- simulate a fresh process: forget the module and drop the good cpath entry
 -- (plain find + slicing: "?" and "." are magic in Lua patterns)
-package.loaded["sendKeyCode"] = nil
+package.loaded["actions"] = nil
 local entry = USERDIR .. "/" .. DLLREL .. "/?.dll;"
 local s, e = package.cpath:find(entry, 1, true)
 if s then package.cpath = package.cpath:sub(1, s - 1) .. package.cpath:sub(e + 1) end
@@ -730,14 +1111,14 @@ rec("E_cpath_clean", tostring(package.cpath:find(USERDIR .. "/" .. DLLREL, 1, tr
 local envE, ctxE = new_env(cfgE)
 revert.init(envE)
 rec("E_init_log", last_log())
-rec("E_log_has_load_failure", tostring(log_has("failed to load sendKeyCode")))
+rec("E_log_has_load_failure", tostring(log_has("failed to load actions")))
 commit(ctxE, "abc")
 injected = {}
 
 -- Safety net: only fire when the module really failed to load. If require had
--- somehow succeeded, module-level SendKeyCode would hold the REAL C function
+-- somehow succeeded, module-level Actions would hold the REAL C function
 -- and firing would inject genuine keystrokes into the focused window.
-if package.loaded["sendKeyCode"] == nil then
+if package.loaded["actions"] == nil then
   rec("E_fire_returns", type_text(revert, envE, ctxE, "qq/"))
   rec("E_injected", table.concat(injected, ","))
   rec("E_log_has_unavailable", tostring(log_has("press_backspace is unavailable")))
@@ -751,16 +1132,16 @@ end
 -- F. end-to-end async path, using the counting-only dry-run dll
 -- =====================================================================
 logs = {}                           -- only look at what F itself logs
-package.loaded["sendKeyCode"] = nil
+package.loaded["actions"] = nil
 local dry_entry = USERDIR_DRY .. "/" .. DLLREL .. "/?.dll;"
 local ds, de = package.cpath:find(dry_entry, 1, true)
 if ds then package.cpath = package.cpath:sub(1, ds - 1) .. package.cpath:sub(de + 1) end
 rime_api.get_user_data_dir = function() return USERDIR_DRY end
 
-local revertF = assert(loadfile(REVERT_PATH))()
+local revertF = assert(loadfile(ACTIONS_PATH))()
 local envF, ctxF = new_env(nil)
 revertF.init(envF)
-local modF = package.loaded["sendKeyCode"]
+local modF = package.loaded["actions"]
 rec("F_module_has_dry_run", modF and type(modF._dry_run_sent))
 rec("F_module_has_press_backspace", modF and type(modF.press_backspace))
 
@@ -842,14 +1223,14 @@ return table.concat(out, "|")
 
 
 def main():
+    prepare_fake_userdir()
     if not build_dry_run_dll():
         return 1
-    prepare_fake_userdir()
 
     lua_src = LUA_SRC.replace("USERDIR_DRY", repr(USERDIR_DRY.replace("\\", "/")))
     lua_src = lua_src.replace("USERDIR", repr(USERDIR_ON_DISK.replace("\\", "/")))
     lua_src = lua_src.replace("DLLREL", repr(DLL_REL_DIR))
-    lua_src = lua_src.replace("REVERT_PATH", repr(os.path.join(BASE, "revert.lua").replace("\\", "/")))
+    lua_src = lua_src.replace("ACTIONS_PATH", repr(os.path.join(BASE, "actions.lua").replace("\\", "/")))
 
     # debug aid: SMOKE_SKIP_F=1 drops the async end-to-end scenario
     skip_f = bool(os.environ.get("SMOKE_SKIP_F"))
@@ -945,7 +1326,7 @@ def main():
         "G_composing_return": "1",
         "G_composing_ignored": "true",
         "G_log_has_composing": "true",
-        # G3: revert/trigger "none" -> hotkey only
+        # G3: actions/trigger "none" -> hotkey only
         "G3_mode_hotkey_only": "true",
         "G3_text_returns": "2,2,2",
         "G3_text_injected": "",
@@ -1041,6 +1422,85 @@ def main():
         "H8_multi_gap": "120",
         "H8b_log_gap": "500",
         "H8b_gap_capped": "500",
+        # I: AI 模式（@ai 触发码 / 取文 / 发送 / 插入 / Esc / replace）
+        "I0_log_ai": "off",
+        "I0_flag": "false",
+        "I0_ret": "2,2,1",
+        "I0_mode": "nil",
+        "I0_log_ignored": "true",
+        "I1_log_ai": "on",
+        "I1_flag": "true",
+        "I1_double_ms": "1000",
+        "I1_send_code": "47",
+        "I1_prompt_eng": "CUSTOM-ENG-PROMPT",
+        "I1_enter_ret": "2,2,1",
+        "I1_mode": "default",
+        "I1_log_mode_on": "true",
+        "I1_press1": "1",
+        "I1_press2": "1",
+        "I1_req_count": "1",
+        "I1_req_url": "https://example.test/v1/chat/completions",
+        "I1_req_model": "test-model",
+        "I1_req_user": "我出门了",
+        "I1_req_auth": "yes",
+        "I1_req_tokens": "128",
+        "I1_nudge": "350/135",
+        "I1_log_sent": "true",
+        "I1_busy_ret": "1",
+        "I1_busy_reqs": "1",
+        "I1_busy_newlogs": "1",
+        "I1_busy_last":
+            "info: actions.lua: ai: previous request still running, not sending again",
+        "I2_take_ret": "1",
+        "I2_send_text": "我出门了，天气很好。",
+        "I2_stack_delta": "1",
+        "I2_stack_ai": "true",
+        "I2_log_inserted": "true",
+        "I2_injected": "",
+        "I3_enter": "2,2,1",
+        "I3_reqs": "1",
+        "I3_injected": "3",
+        "I3_send_text": "XYZ",
+        "I4_injected": "[]",
+        "I4_send_text": "XYZ",
+        "I5_log_failed": "true",
+        "I5_send_text": "[]",
+        "I6_esc_ret": "1",
+        "I6_cancels": "1",
+        "I6_log_cancel": "true",
+        "I6_esc2_ret": "1",
+        "I6_mode_after": "nil",
+        "I7_input": "nihao",
+        "I7_req_user": "nihao",
+        "I7_input_after": "[]",
+        "I8_combo": "true",
+        "I8_ret": "1",
+        "I8_reqs": "1",
+        "I9_flag": "false",
+        "I9_log": "true",
+        "I10_flag": "false",
+        "I10_log": "true",
+        "I11_mode": "eng",
+        "I11_system": "CUSTOM-ENG-PROMPT\\n\\n【上文】今天天气很好。",
+        "I11_log_prompt": "eng",
+        "I12_reqs": "0",
+        "I12_log": "true",
+        "I13_trailing_marks": "我出门了",
+        "I13_marks_between": "我回来了",
+        "I13_only_marks": "-",
+        "I13_include_marks": "我出门了，。",
+        "I14_reqs": "1",
+        "I14_injected": "6",
+        "I14_send_text": "XYZ",
+        "I15_pass": "2",
+        "I15_reqs": "0",
+        "I15_second": "1",
+        "I15_popped": "1",
+        "I15_reqs2": "1",
+        "I15_body_has": "yes",
+        "I15b_first": "1",
+        "I15b_reqs": "0",
+        "I15b_log_no_cjk": "true",
         # E: broken dll_dir
         "E_good_entry_removed": "true",
         "E_cpath_clean": "true",

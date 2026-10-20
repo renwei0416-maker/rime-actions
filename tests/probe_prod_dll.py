@@ -1,22 +1,18 @@
-"""只读冒烟：正式版 sendKeyCode.dll 里 press_keys / press_backspace / open_url 是否真的可用。
+"""只读冒烟：正式版 backspace-build\actions.dll 里 press_keys / press_backspace 是否真的可用。
 
-安全：只调用"参数非法"的 press_keys / open_url（返回 0、不排队、不注入任何按键、不开浏览器），
+安全：只调用"参数非法"的 press_keys（返回 0、不排队、不注入任何按键），
 不调用 press_backspace（那会真的发退格），所以不会影响当前桌面。
-
-dll 位置默认是仓库根目录，可用环境变量 DLLDIR 指定（例如指向 backspace-build）。
 """
 import ctypes as C
 import hashlib
-import os
 import pathlib
 import sys
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-RIME = os.environ.get("RIME_DLL", r"C:\Program Files\Rime\weasel-0.17.4\rime.dll")
-DLLDIR = os.environ.get("DLLDIR", _ROOT)
-DLL = pathlib.Path(DLLDIR) / "sendKeyCode.dll"
+RIME = r"C:\Program Files\Rime\weasel-0.17.4\rime.dll"
+DLLDIR = r"C:\Users\Administrator\Desktop\Ai_Work\DSH_harness\backspace-build"
+DLL = pathlib.Path(DLLDIR) / "actions.dll"
 
 D = C.CDLL(RIME)
 D.luaL_newstate.restype = C.c_void_p
@@ -61,7 +57,7 @@ def check(name, got, want):
 
 check("module api", lua(
     'package.cpath = [[' + DLLDIR + r'\?.dll]] .. ";" .. package.cpath' "\n"
-    'SK = require("sendKeyCode")' "\n"
+    'SK = require("actions")' "\n"
     'return type(SK.press_keys) .. "/" .. type(SK.press_backspace)'
     ' .. "/" .. type(SK.open_url) .. "/" .. tostring(SK._dry_run_sent)'),
     "function/function/function/nil")
@@ -73,7 +69,7 @@ check("module api", lua(
 # 只看"肯定无效"的 spec（`probe_press_keys.py` 的 dry-run 断言已证明它们被拒；
 # 这里换成正式版 dll，被拒 = 什么都不发）。
 # 注意 C 层比 Lua 层宽松：`ctrl+`、`+z`、`ctrl+z,` 这类"有空 token"的写法 C 会容忍
-# （`revert.lua` 的 `valid_key_spec()` 才是把关的那一层），所以不在这里当"必须返回 0"来测。
+# （`actions.lua` 的 `valid_key_spec()` 才是把关的那一层），所以不在这里当"必须返回 0"来测。
 check("press_keys('') -> 0", lua('return SK.press_keys("")'), "0")
 check("press_keys('+') -> 0", lua('return SK.press_keys("+")'), "0")
 check("press_keys(',') -> 0", lua('return SK.press_keys(",")'), "0")

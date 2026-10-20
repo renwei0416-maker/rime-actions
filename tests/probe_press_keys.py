@@ -1,17 +1,39 @@
-"""验证 sendKeyCode.dll 新增的 press_keys：用 dry-run 版把"本来会发出去的按键序列"记下来核对。
+"""验证 actions.dll 新增的 press_keys：用 dry-run 版把"本来会发出去的按键序列"记下来核对。
 
 不向 Windows 发任何按键：dry-run dll 里 SendInput 被替换成事件记录。
 """
 import ctypes as C
 import os
+import subprocess
 import sys
 import time
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-RIME = os.environ.get("RIME_DLL", r"C:\Program Files\Rime\weasel-0.17.4\rime.dll")
-DRYDIR = os.environ.get("DRYDIR", os.path.join(_ROOT, "_testdata", "dryrun"))
+BASE = r"C:\Users\Administrator\Desktop\Ai_Work\DSH_harness\backspace-build"
+MINGW_BIN = r"C:\msys64\mingw64\bin"
+WEASEL_DIR = r"C:\Program Files\Rime\weasel-0.17.4"
+RIME = os.path.join(WEASEL_DIR, "rime.dll")
+DRYDIR = os.path.join(BASE, "_testdata", "dryrun", "userdir", "lua", "wanxiang", "ziji")
+
+
+def ensure_dry_run_dll():
+    target = os.path.join(DRYDIR, "actions.dll")
+    if os.path.exists(target):
+        return
+    os.makedirs(DRYDIR, exist_ok=True)
+    env = dict(os.environ)
+    env["PATH"] = MINGW_BIN + ";" + env["PATH"]
+    cmd = [
+        os.path.join(MINGW_BIN, "gcc.exe"), "-shared", "-fPIC", "-DACTIONS_DRY_RUN",
+        "-o", target, "actions.c", "-Iinclude", "-L" + WEASEL_DIR,
+        "-luser32", "-lrime", "-lshell32", "-lwinhttp", "-O2",
+        "-Wl,--no-insert-timestamp",
+    ]
+    subprocess.run(cmd, cwd=BASE, env=env, check=True)
+
+
+ensure_dry_run_dll()
 
 D = C.CDLL(RIME)
 D.luaL_newstate.restype = C.c_void_p
@@ -43,7 +65,7 @@ def lua(src, args=1):
 
 print("load:", lua(
     'package.cpath = [[' + DRYDIR + r'\?.dll]] .. ";" .. package.cpath' "\n"
-    'M = require("sendKeyCode")' "\n"
+    'M = require("actions")' "\n"
     'return type(M.press_keys) .. " / " .. type(M.press_backspace)'
     ' .. " / dry_run_sent=" .. tostring(M._dry_run_sent)'
     ' .. " / reset=" .. tostring(M._dry_run_reset)'

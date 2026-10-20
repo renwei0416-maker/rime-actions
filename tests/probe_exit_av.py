@@ -14,15 +14,14 @@ import time
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-RIME = os.environ.get("RIME_DLL", r"C:\Program Files\Rime\weasel-0.17.4\rime.dll")
-DLLDIR = os.environ.get("DLLDIR", os.path.join(
-    _ROOT, "_testdata", "dryrun", "userdir", "lua", "wanxiang", "ziji", "sendKeyCode"))
+RIME = r"C:\Program Files\Rime\weasel-0.17.4\rime.dll"
+DLLDIR = (r"C:\Users\Administrator\Desktop\Ai_Work\DSH_harness\backspace-build"
+          r"\_testdata\dryrun\userdir\lua\wanxiang\ziji")
 
 
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "noworker"
-    if not os.path.isfile(os.path.join(DLLDIR, "sendKeyCode.dll")):
+    if not os.path.isfile(os.path.join(DLLDIR, "actions.dll")):
         print("dry-run dll missing; run smoke_backspace.py first")
         return 3
 
@@ -44,7 +43,7 @@ def main():
     fire = "" if mode == "noworker" else f"local accepted = m.press_backspace({count})"
     src = f"""
 package.cpath = {DLLDIR.replace(chr(92), '/')!r} .. "/?.dll;" .. package.cpath
-local m = assert(require("sendKeyCode"))
+local m = assert(require("actions"))
 local before = m._dry_run_sent()
 {fire}
 return tostring(before)

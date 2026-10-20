@@ -12,14 +12,12 @@ Expected: gap 0 finishes in well under 200 ms, gap 250 needs about
 (8 events + 3 step gaps) * 250 ms ~= 2 s.  ASCII output.
 """
 import ctypes as C
-import os
 import time
 
 import probe_inject_variants as P
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-RIME = os.environ.get("RIME_DLL", r"C:\Program Files\Rime\weasel-0.17.4\rime.dll")
-DLL = os.environ.get("DLL_PATH", os.path.join(_ROOT, "sendKeyCode.dll"))
+RIME = r"C:\Program Files\Rime\weasel-0.17.4\rime.dll"
+DLL = r"C:\Users\Administrator\Desktop\Ai_Work\DSH_harness\backspace-build\actions.dll"
 
 D = C.CDLL(RIME)
 D.luaL_newstate.restype = C.c_void_p
@@ -45,7 +43,7 @@ def lua(src):
 
 
 print("dll:", lua(
-    'local f = package.loadlib([[' + DLL + ']], "luaopen_sendKeyCode")\n'
+    'local f = package.loadlib([[' + DLL + ']], "luaopen_actions")\n'
     'SK = f()\n'
     'return type(SK.press_keys)'))
 
