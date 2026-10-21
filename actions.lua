@@ -48,7 +48,23 @@
 --   * 触发码重复（含与 actions/trigger 相同）时，重复的项不生效并记录错误日志。
 --   * 快捷触发码不受 actions/debounce_ms 影响；dll 内部另有 150 毫秒最短间隔。
 -- ===========================================================================
+-- --------------------------------------------------------------- 日志开关
+-- 默认只写 error；actions/debug: true 时才写 info（排查用）
+local DEBUG = false
+local host_log = log
+local log = {
+    info = function(m)
+        if DEBUG and host_log and host_log.info then host_log.info(m) end
+    end,
+    warning = function(m)
+        if host_log and host_log.warning then host_log.warning(m) end
+    end,
+    error = function(m)
+        if host_log and host_log.error then host_log.error(m) end
+    end,
+}
 local DEFAULTS = {
+    debug          = false,
     trigger        = "qq/",
     hotkey         = "",
     shortcuts      = "",
@@ -59,6 +75,12 @@ local DEFAULTS = {
     max_backspaces = 500,
     debounce_ms    = 200,
     key_gap_ms     = 30,
+
+    -- 补记"绕过上屏通知"的文字：万象快符这类由 Lua 直接调 engine:commit_text()
+    -- 打出来的符号只进 librime 的 context.commit_history，不触发
+    -- context.commit_notifier，单靠通知会漏掉它们，回删就少删一个字。
+    -- 开启后每次按键读一次 context.commit_history 把新增记录补进账本，用于回删。
+    history_ledger = true,
 
     -- AI（可选，默认关闭；不写 actions/ai/enabled: true 就不会启用）
     ai_enabled     = false,
@@ -494,6 +516,61 @@ local function ai_preview(text, limit)
     return stop and (text:sub(1, stop - 1) .. "…") or text
 end
 
+local function push_commit(env, text, own)
+    local length = utf8.len(text)
+    if not length or length < 1 then return end
+
+    local stack = env.revert_stack
+    if not stack then return end
+
+    stack[#stack + 1] = { n = length, text = text, ai = own }
+    trim_stack(env)
+end
+
+-- 通知已经记过的文字：读历史时跳过，免得同一笔上屏被记两次
+local function owe_commit(env, text)
+    local owed = env.hist_owed
+    if not owed then return end
+    owed[#owed + 1] = text
+    while #owed > 8 do table.remove(owed, 1) end
+end
+
+-- 补记快符这类"绕过上屏通知"的文字。
+-- 万象快符走 env.engine:commit_text()，文字进 librime 的 context.commit_history
+-- （type = "raw"），但不触发 context.commit_notifier，所以光靠通知会漏掉它们。
+-- 每次按键读一次 commit_history，把上次之后新增的记录补进账本，回删才数得准。
+-- type = "thru" 是没被吃掉的按键，不是上屏文字，跳过；历史最多 20 条，所以每键跟进。
+local function sync_history(env, ctx)
+    if not env.hist_ready or not ctx then return end
+
+    local hist = ctx.commit_history
+    if not (hist and hist.to_table) then return end
+
+    local ok, all = pcall(hist.to_table, hist)
+    if not ok or type(all) ~= "table" then return end
+
+    local seen = env.hist_seen or 0
+    if #all < seen then seen = 0 end
+
+    for i = seen + 1, #all do
+        local rec = all[i]
+        local text = rec and rec.text
+        if type(text) == "string" and text ~= "" and rec.type ~= "thru" then
+            local owed = env.hist_owed
+            if owed and #owed > 0 and owed[1] == text then
+                table.remove(owed, 1)
+            else
+                push_commit(env, text, nil)
+                if log and log.info and env.ai_mode then
+                    log.info(string.format("actions.lua: history n=%d text=%s",
+                        utf8.len(text) or 0, ai_preview(text, 16)))
+                end
+            end
+        end
+    end
+    env.hist_seen = #all
+end
+
 local function on_commit(text, env)
     if not text or text == "" then return end
 
@@ -520,10 +597,18 @@ local function on_commit(text, env)
             length, tostring(own), ai_preview(text, 16)))
     end
 
-    stack[#stack + 1] = { n = length, text = text, ai = own }
+    if own then
+        -- 自己打进去的答案要立刻记账（带 ai 标记），历史里那条同名的跳过
+        push_commit(env, text, true)
+        owe_commit(env, text)
+    elseif not env.hist_ready then
+        -- 读不到历史：只能靠上屏通知这一条路
+        push_commit(env, text, nil)
+    end
+    -- 能读历史时这里不记：sync_history 会按历史顺序补进来（快符也在同一条序列里）
+
     -- 这笔文字一上屏，之前按过的回车就都跑到它前面去了，不再算"光标前的空行"
     env.ai_newlines = 0
-    trim_stack(env)
 end
 
 -- 把记录放回栈尾：dll 拒绝了这次请求时用，免得白按
@@ -1363,6 +1448,78 @@ local function ai_clip_poll(env)
     return true
 end
 
+-- 把一段文字打到光标处。cut > 0 时先删掉这么多字符，再打文字：两步交给 dll
+-- 的同一个任务，按顺序执行，所以不会出现"还没删完就开始打字"。
+-- 返回 true = 已安排；false = 这次没成（dll 忙或出错），由调用方决定是否重试。
+local function ai_insert_text(env, cut, text)
+    local ok, ret
+
+    if cut > 0 and Actions.press_backspace_then_text then
+        ok, ret = pcall(Actions.press_backspace_then_text, cut, text)
+        if not ok then
+            if log and log.error then
+                log.error("actions.lua: ai: press_backspace_then_text failed: " .. tostring(ret))
+            end
+            return false
+        end
+    else
+        -- 旧 dll 没有"删完再打字"的合并接口：退回先删后打两步（顺序不保证）
+        if cut > 0 then inject_backspaces(env, cut) end
+        ok, ret = pcall(Actions.send_text, text)
+        if not ok then
+            if log and log.error then
+                log.error("actions.lua: ai: send_text failed: " .. tostring(ret))
+            end
+            return false
+        end
+    end
+
+    if ret == 2 then
+        return false
+    end
+    if ret ~= 1 then
+        if log and log.info then
+            log.info("actions.lua: ai: the dll refused to insert the answer")
+        end
+        return false
+    end
+    return true
+end
+
+-- 打进去的字会一个个重新经过输入法：把它们标成自己的输出、并开一个打字窗口
+local function ai_after_insert(env, content)
+    local length = utf8.len(content) or 0
+
+    if length > 0 then push_back(env, { n = length, text = content, ai = true }) end
+    env.ai_last_text = content
+    env.ai_text_pos = 1
+    env.ai_typing_until = os.clock() + 0.25 + 0.002 * math.max(#content, 1) + 0.5
+    env.ai_last_push = nil
+end
+
+-- 上一次没插进去的回答（dll 忙）在这里补插；返回 true = 还要再约一次唤醒键
+local function ai_flush_insert(env)
+    local pending = env.ai_pending_insert
+
+    if not pending then return false end
+    if os.clock() - (env.ai_pending_since or 0) > 10 then
+        env.ai_pending_insert = nil
+        if log and log.info then
+            log.info("actions.lua: ai: insert given up (the dll stayed busy)")
+        end
+        return false
+    end
+    if not ai_insert_text(env, pending.cut or 0, pending.text) then
+        return true
+    end
+    env.ai_pending_insert = nil
+    ai_after_insert(env, pending.text)
+    if log and log.info then
+        log.info(string.format("actions.lua: ai: inserted %d chars (deferred)", #pending.text))
+    end
+    return false
+end
+
 -- 轮询后台请求；返回 true = 这一次有了结论（成功或失败）
 local function ai_take(env)
     local req = env.ai_req
@@ -1418,6 +1575,7 @@ local function ai_take(env)
     -- 开了 replace：先把原句删掉再插回答。删的范围和"发给 AI 的那一句"一致——
     -- 从光标往回删到上一个 sentence_marks 符号为止（符号之后的内容连末尾那串标点一起删）。
     -- 删的这段里有换行就不删（跨行不动）。
+    local cut = 0
     if req.replace and req.cut and req.cut > 0 then
         if (req.span or ""):find("\n", 1, true) then
             if log and log.info then
@@ -1432,38 +1590,27 @@ local function ai_take(env)
                 log.info(string.format("actions.lua: ai: replace %d chars (span=%s, text=%s)",
                     req.cut, ai_preview(req.span, 24), ai_preview(req.text, 40)))
             end
-            inject_backspaces(env, req.cut)
+            cut = req.cut
             -- 原句连同光标前的回车一起删掉了，计数清零
             env.ai_newlines = 0
         end
     end
 
-    local sent, send_err = pcall(Actions.send_text, content)
-    if not sent then
-        if log and log.error then
-            log.error("actions.lua: ai: send_text failed: " .. tostring(send_err))
-        end
-        return true
-    end
-    if send_err == 2 then
+    if not ai_insert_text(env, cut, content) then
+        -- dll 正忙（上一段还在打、或距上次注入太近）：留着，下一次唤醒键再补插，
+        -- 不要静默丢掉这一份回答
+        env.ai_pending_insert = { cut = cut, text = content }
+        env.ai_pending_since = os.clock()
         if log and log.info then
-            log.info("actions.lua: ai: send_text ignored (上一段文字还在打)")
+            log.info("actions.lua: ai: dll is busy, insert deferred")
         end
         return true
     end
 
-    local length = utf8.len(content) or 0
-    if length > 0 then push_back(env, { n = length, text = content, ai = true }) end
-
-    -- 刚打进去的字会一个个重新经过输入法：在这个窗口里把它们当普通正文放过去，
-    -- 不要当成触发码/发送键（正文里有 / 或者 ; 时会被自己触发）
-    env.ai_last_text = content
-    env.ai_text_pos = 1
-    env.ai_typing_until = os.clock() + 0.25 + 0.002 * math.max(#content, 1) + 0.5
-    env.ai_last_push = nil
+    ai_after_insert(env, content)
 
     if log and log.info then
-        log.info(string.format("actions.lua: ai: inserted %d chars", length))
+        log.info(string.format("actions.lua: ai: inserted %d chars", #content))
     end
     return true
 end
@@ -1505,13 +1652,15 @@ end
 local function ai_handle_key(key, env)
     local kc = key.keycode
 
-    -- 唤醒键：把结果取回来；还在等就再约一次
+    -- 唤醒键：先把上次没插进去的回答补上，再取结果；还在等就再约一次
     if kc == env.ai_nudge_key or kc == vk_to_keysym(env.ai_nudge_key) then
+        ai_flush_insert(env)
         ai_take(env)
         local waiting_clip = ai_clip_poll(env)
         -- 续约：一次唤醒最多排一次，且只按"按下"排。抬起事件也走到这里，
         -- 如果两边都排，唤醒键的个数每轮翻一倍。
-        if (env.ai_req or waiting_clip) and env.ai_nudge and Actions.nudge and not key:release() then
+        if (env.ai_req or waiting_clip or env.ai_pending_insert)
+            and env.ai_nudge and Actions.nudge and not key:release() then
             local now = os.clock()
             local interval = (env.ai_nudge_interval or DEFAULTS.ai_nudge_interval) / 1000
             if not env.ai_nudged or (now - env.ai_nudged) >= interval * 0.9 then
@@ -1750,6 +1899,13 @@ end
 local function init(env)
     local config = env.engine and env.engine.schema and env.engine.schema.config
 
+    -- 日志开关：只有配置里明确写了才改（不写就沿用当前值，默认只记 error）
+    if config and config.get_bool then
+        local want = config:get_bool("actions/debug")
+        if want ~= nil then DEBUG = (want == true) end
+    end
+    env.revert_debug = DEBUG
+
     env.revert_trigger    = cfg_string(config, "actions/trigger", DEFAULTS.trigger)
     env.revert_dll_dir    = cfg_string(config, "actions/dll_dir", DEFAULTS.dll_dir)
     env.revert_stack_size = cfg_int(config, "actions/stack_size", DEFAULTS.stack_size,
@@ -1765,6 +1921,28 @@ local function init(env)
 
     env.revert_stack = {}
     env.revert_last = nil
+
+    -- 快符补记：要求 rime 的 context.commit_history 能读（有 to_table 方法），
+    -- 读不到就退回只靠上屏通知记账
+    env.hist_ready = cfg_bool(config, "actions/history_ledger", DEFAULTS.history_ledger)
+    env.hist_owed = {}
+    env.hist_seen = 0
+    if env.hist_ready then
+        local ctx = env.engine and env.engine.context
+        local hist = ctx and ctx.commit_history
+        if not (hist and hist.to_table) then
+            env.hist_ready = false
+            if log and log.warning then
+                log.warning("actions.lua: actions/history_ledger needs context.commit_history, ignored")
+            end
+        else
+            local ok, all = pcall(hist.to_table, hist)
+            if ok and type(all) == "table" then
+                -- 从当前历史长度起算：初始化之前的记录不算进账本
+                env.hist_seen = #all
+            end
+        end
+    end
 
     -- 组合键：不填（默认空）= 不启用；填了就多一种触发方式，几种方式可以同时用
     local hotkey_spec = cfg_string(config, "actions/hotkey", DEFAULTS.hotkey)
@@ -1844,6 +2022,10 @@ local function fini(env)
 end
 
 local function func(key, env)
+    -- 先把历史里新增的记录补进账本（快符这类不触发上屏通知的文字靠这一步），
+    -- 这样下面的回删动作数到的字数是完整的
+    sync_history(env, env.engine and env.engine.context)
+
     -- 光标前的回车不会上屏（不进记账），但 replace 要从光标往回删，
     -- 这些回车挡在光标和原句之间，先记下来，发送时并进删除长度里。
     if env.ai_mode and not key:release()
@@ -1939,4 +2121,6 @@ return {
     fini = fini,
     -- 给离线测试看的：预置的快捷键表
     default_shortcuts = DEFAULT_SHORTCUTS,
+    -- 给离线测试看的：跳过配置直接切日志开关
+    set_debug = function(on) DEBUG = (on == true) end,
 }

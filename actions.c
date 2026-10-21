@@ -93,15 +93,22 @@
 #define MAX_URL_LEN   2048  /* open_url 的网址最长字符数（percent-encode 之后）*/
 
 /* 待发槽位、忙标志、上次注入时刻：跨线程访问，用原子操作读写 */
-static volatile LONG      g_pending_kind  = 0;  /* 0=空闲 1=退格 2=组合键 3=打开网址 */
-static volatile LONG      g_pending_count = 0;  /* kind==1 时要发几个退格 */
+static volatile LONG      g_pending_kind  = 0;  /* 0=空闲 1=退格 2=组合键 3=打开网址 4=读剪贴板 5=删完再打字 */
+static volatile LONG      g_pending_count = 0;  /* kind==1/5 时要发几个退格 */
 static char               g_pending_spec[MAX_SPEC_LEN + 1]; /* kind==2 时的按键串 */
 static char               g_pending_url[MAX_URL_LEN + 1];   /* kind==3 时的网址 */
 static volatile LONG      g_pending_gap   = STEP_GAP_MS;     /* kind==2 时相邻按键的间隔（毫秒） */
+static char              *g_pending_text  = NULL;            /* kind==5 时要打的字（malloc，worker 负责 free） */
 static volatile LONG      g_busy       = 0;
+static volatile LONG      g_text_busy  = 0;   /* 一段文字正在打：同一时刻只允许一段 */
 static volatile ULONGLONG g_last_start = 0;
 static PVOID              g_worker     = NULL;
 static volatile LONG      g_stop       = 0;   /* DLL 卸载时置 1，让后台线程自己收摊 */
+
+/* 除 worker 之外的临时线程（HTTP / 打字 / 唤醒）也登记在这里：卸载时一起等，
+ * 免得模块已经卸掉了、线程还在跑我们的代码。 */
+#define MAX_EXTRA_THREADS 8
+static PVOID g_extra_threads[MAX_EXTRA_THREADS];
 
 /* 离线自测专用：用 -DACTIONS_DRY_RUN 另编一份"只记不发"的 dll 来验证
  * 异步流程与按键序列，正式 dll 不含任何测试钩子（下面这些 #ifdef 都不会编进去）。 */
@@ -116,6 +123,52 @@ static char          g_dry_run_url_text[MAX_URL_LEN + 1];
 /* 最后一次 press_keys 用的按键间隔，供自测断言（dry-run 不真的等） */
 static volatile LONG g_dry_run_gap = STEP_GAP_MS;
 #endif
+
+/* 登记一条临时线程的句柄；槽位不够就直接关句柄（线程照跑，只是不参与卸载等待）。
+ * 登记前顺手回收已经结束的线程句柄，所以短命的线程不会占满槽位。 */
+static void track_thread(HANDLE th)
+{
+    int i;
+
+    if (!th)
+        return;
+
+    for (i = 0; i < MAX_EXTRA_THREADS; i++) {
+        PVOID cur = g_extra_threads[i];
+
+        if (cur) {
+            if (WaitForSingleObject((HANDLE)cur, 0) == WAIT_OBJECT_0
+                && InterlockedCompareExchangePointer(&g_extra_threads[i], th, cur) == cur) {
+                CloseHandle((HANDLE)cur);
+                return;
+            }
+            continue;
+        }
+        if (InterlockedCompareExchangePointer(&g_extra_threads[i], th, NULL) == NULL)
+            return;
+    }
+    CloseHandle(th);
+}
+
+/* 卸载时等登记过的临时线程收尾；总预算不超过 WORKER_EXIT_WAIT_MS。 */
+static void shutdown_extra_threads(void)
+{
+    ULONGLONG deadline = GetTickCount64() + WORKER_EXIT_WAIT_MS;
+    int i;
+
+    for (i = 0; i < MAX_EXTRA_THREADS; i++) {
+        HANDLE th = (HANDLE)InterlockedExchangePointer(&g_extra_threads[i], NULL);
+        ULONGLONG now;
+        DWORD wait;
+
+        if (!th)
+            continue;
+        now = GetTickCount64();
+        wait = now < deadline ? (DWORD)(deadline - now) : 0;
+        WaitForSingleObject(th, wait);
+        CloseHandle(th);
+    }
+}
 
 /* 把一批按键发出去，返回成功发出的按键个数 */
 static UINT send_batch(INPUT *events, UINT total)
@@ -133,6 +186,10 @@ static UINT send_batch(INPUT *events, UINT total)
                         (unsigned)events[i].ki.wScan,
                         (events[i].ki.dwFlags & KEYEVENTF_EXTENDEDKEY) ? "sx" : "s",
                         (events[i].ki.dwFlags & KEYEVENTF_KEYUP) ? "-up" : "");
+            else if (events[i].ki.dwFlags & KEYEVENTF_UNICODE)
+                sprintf(g_dry_run_log[idx], "u%04X%s",
+                        (unsigned)events[i].ki.wScan,
+                        (events[i].ki.dwFlags & KEYEVENTF_KEYUP) ? "-up" : "");
             else
                 sprintf(g_dry_run_log[idx], "%02X%s",
                         (unsigned)events[i].ki.wVk,
@@ -149,9 +206,6 @@ static UINT send_batch(INPUT *events, UINT total)
  * gap <= 0 时退回"一次塞进去"的老写法（最快，但有些程序反应不过来）。 */
 static UINT send_events_spaced(INPUT *events, UINT total, int gap)
 {
-    UINT i;
-    UINT sent = 0;
-
     if (gap <= 0 || total == 0)
         return send_batch(events, total);
 
@@ -159,6 +213,9 @@ static UINT send_events_spaced(INPUT *events, UINT total, int gap)
     /* 自测版只记录事件、不真的等，否则一次触发要跑好几秒 */
     return send_batch(events, total);
 #else
+    UINT i;
+    UINT sent = 0;
+
     for (i = 0; i < total; i++) {
         if (SendInput(1, &events[i], sizeof(INPUT)) != 1)
             break;
@@ -528,6 +585,7 @@ static void open_url_now(const char *url)
 
 /* 后台线程：只在这里发按键 */
 static void clip_read_now(void); /* 定义在"剪贴板"一节 */
+static void type_text_now(const char *text); /* 定义在"直接插入文本"一节 */
 
 static DWORD WINAPI worker_main(LPVOID param)
 {
@@ -552,6 +610,30 @@ static DWORD WINAPI worker_main(LPVOID param)
                 open_url_now(g_pending_url);
             else if (kind == 4)
                 clip_read_now();
+            else if (kind == 5) {
+                /* 先删掉前面 count 个字符，再把这串文字打上去：两步在同一条线程里
+                 * 顺序执行，所以不会出现"一边删一边打"的错位。 */
+                char *text = (char *)InterlockedExchangePointer(
+                                 (PVOID volatile *)&g_pending_text, NULL);
+                int want = (int)count;
+                int done = 0;
+                int tries;
+
+                for (tries = 0; tries < 3 && done < want; tries++) {
+                    done += inject_backspaces(want - done);
+                    if (done < want)
+                        Sleep(30);
+                }
+                if (text) {
+                    /* 删除没走完就不打字：宁可少一段，也不把字打到错的位置 */
+                    if (done >= want) {
+                        Sleep(BATCH_GAP_MS * 2);
+                        type_text_now(text);
+                    }
+                    free(text);
+                }
+                InterlockedExchange(&g_text_busy, 0);
+            }
             InterlockedExchange(&g_busy, 0);
         } else {
             Sleep(WORKER_POLL_MS);
@@ -626,11 +708,11 @@ static int l_press_backspace(lua_State *L)
     }
 
     if (!ensure_worker()) {
-        /* 极少见：线程建不出来。退回同步发送，功能不至于不可用
-         * （代价是带回同步注入的重入风险）。 */
-        inject_backspaces((int)count);
+        /* 线程建不出来：明确失败，由 Lua 记日志并保留账本。
+         * 绝不能在本线程直接注入——这里正处在输入法的按键回调里，
+         * 同步注入会重新进入处理链。 */
         InterlockedExchange(&g_busy, 0);
-        lua_pushinteger(L, count);
+        lua_pushinteger(L, 0);
         return 1;
     }
 
@@ -676,9 +758,9 @@ static int l_press_keys(lua_State *L)
     }
 
     if (!ensure_worker()) {
-        int steps = inject_keys(spec, gap);
+        /* 建不出线程就明确失败，不在按键回调里同步发按键 */
         InterlockedExchange(&g_busy, 0);
-        lua_pushinteger(L, steps > 0 ? 1 : 0);
+        lua_pushinteger(L, 0);
         return 1;
     }
 
@@ -688,6 +770,64 @@ static int l_press_keys(lua_State *L)
     InterlockedExchange(&g_pending_gap, (LONG)gap);
     InterlockedExchange(&g_pending_count, 1);
     InterlockedExchange(&g_pending_kind, 2);
+    lua_pushinteger(L, 1);
+    return 1;
+}
+
+/* ==================================================================
+ * 删除 + 打字（一个任务）
+ *   press_backspace_then_text(count, text) -> 1=已安排 2=忙 0=参数或线程问题
+ *
+ * 先在同一个后台线程里发 count 个退格，再把这串文字打上去。两步串行执行，
+ * 所以不管删除要多久，文字都不会插到"还没删完"的位置。
+ * ================================================================== */
+static int l_press_backspace_then_text(lua_State *L)
+{
+    lua_Integer count = luaL_optinteger(L, 1, 0);
+    size_t len = 0;
+    const char *text = luaL_checklstring(L, 2, &len);
+    char *copy;
+
+    if (count < 0 || len == 0 || len > 20000) {
+        lua_pushinteger(L, 0);
+        return 1;
+    }
+    if (count > MAX_BACKSPACES)
+        count = MAX_BACKSPACES;
+
+    /* 一段文字同时只能打一段：两段交叉会把字打乱 */
+    if (InterlockedCompareExchange(&g_text_busy, 1, 0) != 0) {
+        lua_pushinteger(L, 2);
+        return 1;
+    }
+
+    if (!claim_slot()) {
+        InterlockedExchange(&g_text_busy, 0);
+        lua_pushinteger(L, 2);
+        return 1;
+    }
+
+    if (!ensure_worker()) {
+        InterlockedExchange(&g_text_busy, 0);
+        InterlockedExchange(&g_busy, 0);
+        lua_pushinteger(L, 0);
+        return 1;
+    }
+
+    copy = (char *)malloc(len + 1);
+    if (!copy) {
+        InterlockedExchange(&g_text_busy, 0);
+        InterlockedExchange(&g_busy, 0);
+        lua_pushinteger(L, 0);
+        return 1;
+    }
+    memcpy(copy, text, len);
+    copy[len] = '\0';
+
+    /* 先填槽位再发布 kind */
+    InterlockedExchangePointer((PVOID volatile *)&g_pending_text, copy);
+    InterlockedExchange(&g_pending_count, (LONG)count);
+    InterlockedExchange(&g_pending_kind, 5);
     lua_pushinteger(L, 1);
     return 1;
 }
@@ -841,12 +981,24 @@ static char          *g_http_result = NULL;   /* DONE 时有效，malloc 的 */
 static size_t         g_http_result_len = 0;
 static char           g_http_error[512];
 static CRITICAL_SECTION g_http_lock;
-static volatile LONG  g_http_lock_ready = 0;
+static INIT_ONCE      g_http_once     = INIT_ONCE_STATIC_INIT;
+static volatile LONG  g_http_lock_ready = 0;   /* 只在初始化回调里置 1，供卸载时判断 */
 
+static BOOL CALLBACK http_lock_init_once(PINIT_ONCE once, PVOID param, PVOID *ctx)
+{
+    (void)once;
+    (void)param;
+    (void)ctx;
+    InitializeCriticalSection(&g_http_lock);
+    InterlockedExchange(&g_http_lock_ready, 1);
+    return TRUE;
+}
+
+/* 真正的一次性初始化：InitOnceExecuteOnce 保证临界区先建好，
+ * 别的线程才可能看到"已完成"，不会拿到没初始化的锁。 */
 static void http_lock_init(void)
 {
-    if (InterlockedCompareExchange(&g_http_lock_ready, 1, 0) == 0)
-        InitializeCriticalSection(&g_http_lock);
+    InitOnceExecuteOnce(&g_http_once, http_lock_init_once, NULL, NULL);
 }
 
 /* UTF-8 → 宽字符（malloc 的新串，调用方 free） */
@@ -1162,8 +1314,7 @@ static int l_http_request(lua_State *L)
         lua_pushinteger(L, 0);
         return 1;
     }
-    CloseHandle(th);
-
+    track_thread(th);
     lua_pushinteger(L, seq);
     return 1;
 }
@@ -1270,12 +1421,22 @@ static size_t           g_clip_len = 0;
 static char             g_clip_error[128];
 static volatile LONG    g_clip_state = CLIP_IDLE;
 static CRITICAL_SECTION g_clip_lock;
-static volatile LONG    g_clip_lock_ready = 0;
+static INIT_ONCE        g_clip_once       = INIT_ONCE_STATIC_INIT;
+static volatile LONG    g_clip_lock_ready = 0;   /* 只在初始化回调里置 1，供卸载时判断 */
+
+static BOOL CALLBACK clip_lock_init_once(PINIT_ONCE once, PVOID param, PVOID *ctx)
+{
+    (void)once;
+    (void)param;
+    (void)ctx;
+    InitializeCriticalSection(&g_clip_lock);
+    InterlockedExchange(&g_clip_lock_ready, 1);
+    return TRUE;
+}
 
 static void clip_lock_init(void)
 {
-    if (InterlockedCompareExchange(&g_clip_lock_ready, 1, 0) == 0)
-        InitializeCriticalSection(&g_clip_lock);
+    InitOnceExecuteOnce(&g_clip_once, clip_lock_init_once, NULL, NULL);
 }
 
 /* 读剪贴板：成功返回 malloc 的 UTF-8（调用方 free），失败返回 NULL 并写 err */
@@ -1485,7 +1646,7 @@ static int l_nudge(lua_State *L)
         lua_pushinteger(L, 0);
         return 1;
     }
-    CloseHandle(th);
+    track_thread(th);
     lua_pushinteger(L, 1);
     return 1;
 }
@@ -1499,22 +1660,28 @@ static int l_nudge(lua_State *L)
  * 和 press_keys 一样必须在后台线程里延时再发：正在处理按键时注入会重入。
  * 一次只允许一段文字在打，两段交叉会把字打乱。
  * ================================================================== */
-static volatile LONG g_text_busy = 0;
 
-static DWORD WINAPI send_text_thread(LPVOID param)
+/* 逐字符把 UTF-8 文本打进当前窗口。只在后台线程里调用，
+ * 且调用前要确保本次按键已经处理完（worker 里已等过 FIRE_DELAY_MS）。 */
+static void type_text_now(const char *text)
 {
-    char *text = (char *)param;
     WCHAR *w;
     int need, i;
 
-    Sleep(250); /* 等这次按键处理结束，编码窗口稳定 */
+    if (!text || !*text)
+        return;
 
     need = MultiByteToWideChar(CP_UTF8, 0, text, -1, NULL, 0);
-    w = (WCHAR *)malloc(sizeof(WCHAR) * (size_t)(need > 0 ? need : 1));
-    if (w && need > 0) {
-        MultiByteToWideChar(CP_UTF8, 0, text, -1, w, need);
+    if (need <= 1)
+        return;
+    w = (WCHAR *)malloc(sizeof(WCHAR) * (size_t)need);
+    if (!w)
+        return;
+
+    if (MultiByteToWideChar(CP_UTF8, 0, text, -1, w, need) > 0) {
         for (i = 0; i < need - 1; i++) {
             INPUT in[2];
+
             ZeroMemory(in, sizeof(in));
             in[0].type = INPUT_KEYBOARD;
             in[0].ki.wScan = w[i];
@@ -1522,11 +1689,20 @@ static DWORD WINAPI send_text_thread(LPVOID param)
             in[1].type = INPUT_KEYBOARD;
             in[1].ki.wScan = w[i];
             in[1].ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
-            SendInput(2, in, sizeof(INPUT));
+            send_batch(in, 2);
             Sleep(2);
         }
     }
     free(w);
+}
+
+static DWORD WINAPI send_text_thread(LPVOID param)
+{
+    char *text = (char *)param;
+
+    Sleep(250); /* 等这次按键处理结束，编码窗口稳定 */
+    type_text_now(text);
+
     free(text);
     InterlockedExchange(&g_text_busy, 0);
     return 0;
@@ -1563,13 +1739,14 @@ static int l_send_text(lua_State *L)
         lua_pushinteger(L, 0);
         return 1;
     }
-    CloseHandle(th);
+    track_thread(th);
     lua_pushinteger(L, 1);
     return 1;
 }
 
 static const luaL_Reg module_functions[] = {
     {"press_backspace", l_press_backspace},
+    {"press_backspace_then_text", l_press_backspace_then_text},
     {"press_keys",      l_press_keys},
     {"open_url",        l_open_url},
     {"clipboard_get",   l_clipboard_get},
@@ -1602,35 +1779,44 @@ EXPORT int luaopen_actions(lua_State *L)
 
 /* ==================================================================
  * DLL 生命周期
- *   卸载（小狼毫退出、升级、重新部署）时给后台线程发停止信号，
- *   最多等 WORKER_EXIT_WAIT_MS 让它自己收摊，然后关掉句柄。
- *   这里处在加载器锁里，所以只做"有界等待"：等不到就放它走，
- *   不做无限 join，避免把进程退出流程卡死。
+ *
+ * 两种卸载要区别对待：
+ *   - 进程正在退出（DllMain 的 reserved 非 NULL）：系统随后会结束所有线程，
+ *     这里只发停止信号、不等待，避免在加载器锁里等一条可能还要加载 DLL 的线程；
+ *   - 只是 FreeLibrary（reserved 为 NULL）：先发停止信号，再在
+ *     WORKER_EXIT_WAIT_MS 预算内等 worker 与登记过的临时线程收尾，然后销毁临界区。
  * ================================================================== */
-static void worker_shutdown(void)
+static void worker_shutdown(BOOL wait)
 {
     HANDLE th = (HANDLE)InterlockedExchangePointer((PVOID volatile *)&g_worker, NULL);
 
-    if (!th)
-        return;
-
     InterlockedExchange(&g_stop, 1);
-    WaitForSingleObject(th, WORKER_EXIT_WAIT_MS);
-    CloseHandle(th);
+
+    if (th) {
+        if (wait)
+            WaitForSingleObject(th, WORKER_EXIT_WAIT_MS);
+        CloseHandle(th);
+    }
+    if (wait)
+        shutdown_extra_threads();
 }
 
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved)
 {
-    (void)reserved;
-
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(instance);
     } else if (reason == DLL_PROCESS_DETACH) {
-        worker_shutdown();
-        if (InterlockedExchange(&g_http_lock_ready, 0) == 1)
-            DeleteCriticalSection(&g_http_lock);
-        if (InterlockedExchange(&g_clip_lock_ready, 0) == 1)
-            DeleteCriticalSection(&g_clip_lock);
+        /* reserved 非 NULL 表示"进程正在退出" */
+        BOOL exiting = (reserved != NULL);
+
+        worker_shutdown(!exiting);
+
+        if (!exiting) {
+            if (InterlockedExchange(&g_http_lock_ready, 0) == 1)
+                DeleteCriticalSection(&g_http_lock);
+            if (InterlockedExchange(&g_clip_lock_ready, 0) == 1)
+                DeleteCriticalSection(&g_clip_lock);
+        }
     }
     return TRUE;
 }

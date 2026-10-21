@@ -12,12 +12,12 @@ import sys
 import tempfile
 import threading
 import time
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-RIME = os.environ.get("RIME_DLL", r"C:\Program Files\Rime\weasel-0.17.4\rime.dll")
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DLL = os.environ.get("ACTIONS_DLL", os.path.join(_ROOT, "actions.dll"))
+RIME = r"C:\Program Files\Rime\weasel-0.17.4\rime.dll"
+DLL = os.path.join(_ROOT, "actions.dll")
 
 CHECKS = []
 

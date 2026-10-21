@@ -15,6 +15,8 @@
 | AI 模式 | `ai;` 进入，打字后连按两下 `/` | 把文字发给模型，回复直接写到光标处 |
 | 剪贴板 | AI 模式下 `Ctrl+Alt+;` | 把剪贴板里的文字直接发给模型（`actions/ai/clip_key` 可改） |
 
+两个辅助开关：`"actions/history_ledger": true`（默认开，把万象快符这类绕过上屏通知的文字也补进上屏记录，否则回删会少删一个）、`"actions/debug": true`（默认 `false` 只写错误，排查时才打开）。
+
 内置 26 项快捷触发码（默认不启用，写上 `"actions/shortcuts": "@defaults"` 才生效）：
 
 | 触发码 | 动作 | 触发码 | 动作 |
@@ -76,11 +78,11 @@ python tests\smoke_backspace.py
 ```
 
 需要 Python 3.12、MSYS2 mingw64 gcc、装好的小狼毫。脚本先现编一份 `-DACTIONS_DRY_RUN`
-的"只记账、不注入"的 dll，再跑 350 项断言（触发码、记账、去抖、26 项快捷键、多步、
+的"只记账、不注入"的 dll，再跑 378 项断言（触发码、记账、去抖、26 项快捷键、多步、
 删到符号、浏览器搜索、AI、配置校验）。路径可用环境变量覆盖：
 `MINGW_BIN`、`WEASEL_DIR`、`RIME_DLL`、`DLLDIR`。
 
-全部通过时输出 `CHECKS: 350 asserted, ALL PASS`，进程退出码 0。
+全部通过时输出 `CHECKS: 378 asserted, ALL PASS`，进程退出码 0。
 
 ## 限制
 

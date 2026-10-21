@@ -15,8 +15,9 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-RIME = r"C:\Program Files\Rime\weasel-0.17.4\rime.dll"
-DLLDIR = os.path.join(_ROOT, "_testdata", "dryrun", "userdir", "lua", "wanxiang", "ziji")
+RIME = os.environ.get("RIME_DLL", r"C:\Program Files\Rime\weasel-0.17.4\rime.dll")
+DLLDIR = os.environ.get(
+    "DLLDIR", os.path.join(_ROOT, "_testdata", "dryrun", "userdir", "lua", "wanxiang", "ziji"))
 
 
 def main():

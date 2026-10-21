@@ -132,6 +132,7 @@ end
 
 -- ============ load the real component ============
 local revert = assert(loadfile(ACTIONS_PATH))()
+revert.set_debug(true)   -- 测试要断言 info 日志；生产默认只写 error
 rec("chunk_loaded", type(revert) == "table")
 rec("has_init", type(revert.init))
 rec("has_func", type(revert.func))
@@ -153,6 +154,27 @@ local function new_env(config)
     connect = function(self, fn)
       ctx.fn = fn
       return { disconnect = function() ctx.disconnected = true end }
+    end,
+  }
+  -- librime 的 context.commit_history：万象快符走 engine:commit_text()，
+  -- 只进这里、不触发 commit_notifier
+  ctx.commit_history = {
+    list = {},
+    push = function(self, text, kind)
+      self.list[#self.list + 1] = { type = kind or "raw", text = text }
+      while #self.list > 20 do table.remove(self.list, 1) end
+    end,
+    to_table = function(self)
+      local out = {}
+      for i = 1, #self.list do
+        out[i] = { type = self.list[i].type, text = self.list[i].text }
+      end
+      return out
+    end,
+    latest_text = function(self)
+      local n = #self.list
+      if n == 0 then return "" end
+      return self.list[n].text
     end,
   }
   local env = { engine = { context = ctx } }
@@ -196,6 +218,12 @@ end
 local injected = {}
 local function commit(ctx, text)
   if ctx.fn then ctx.fn({ get_commit_text = function() return text end }) end
+  if ctx.commit_history then ctx.commit_history:push(text) end
+end
+
+-- 万象快符：只进 commit_history，不触发上屏通知
+local function quick(ctx, text)
+  if ctx.commit_history then ctx.commit_history:push(text) end
 end
 
 -- =====================================================================
@@ -752,6 +780,19 @@ mod.http_result = function()
 end
 mod.http_cancel = function() cancels = cancels + 1; req_state = "idle"; return 1 end
 mod.send_text = function(text) sends[#sends + 1] = text; return 1 end
+-- "?????"???????? injected??????????????????
+combined = {}
+combined_return = nil
+mod.press_backspace_then_text = function(n, text)
+  injected[#injected + 1] = n
+  combined[#combined + 1] = tostring(n) .. ":" .. text
+  if combined_return then
+    local r = combined_return
+    combined_return = nil
+    return r
+  end
+  return 1
+end
 mod.clipboard_get = function()
   if clip_err then local e = clip_err; clip_err = nil; return nil, e end
   if clip_text == nil then return nil, "剪贴板里没有文本" end
@@ -884,6 +925,7 @@ envI3.ai_typing_until = nil   -- 测试里跳过“结果正在打字”窗口
 rec("I3_reqs", tostring(#requests))
 rec("I3_injected", table.concat(injected, ","))
 rec("I3_send_text", table.concat(sends, "|"))
+rec("I3_combined", combined and combined[#combined] or "")
 
 -- I4: replace=true 但原文跨行 -> 一句都不删
 commit(ctxI3, "\u{7b2c}\u{4e00}\u{884c}\n\u{7b2c}\u{4e8c}\u{884c}")
@@ -1157,6 +1199,7 @@ sends = {}
 feed(revert, envI20, ctxI20, key(0x87))
 rec("I20_injected", table.concat(injected, ","))
 rec("I20_send_text", table.concat(sends, "|"))
+rec("I20_combined", combined and combined[#combined] or "")
 rec("I20_log_skip", tostring(log_has("replace skipped")))
 revert.fini(envI20)
 
@@ -1179,7 +1222,34 @@ rec("I20b_reqs", tostring(#requests))
 rec("I20b_user", requests[1] and last_user(requests[1].body) or "-")
 rec("I20b_injected", table.concat(injected, ","))
 rec("I20b_send_text", table.concat(sends, "|"))
+rec("I20b_combined", combined and combined[#combined] or "")
 revert.fini(envI20b)
+
+-- I35: dll busy -> keep the answer, insert it on the next tick
+do
+  logs = {}
+  local envI35, ctxI35 = new_env(cfgI20)
+  revert.init(envI35)
+  type_text(revert, envI35, ctxI35, "ai;")
+  commit(ctxI35, "\u{798f}\u{5efa}\u{7684}\u{7f8e}\u{98df}")
+  requests, sends, injected, combined = {}, {}, {}, {}
+  envI35.ai_last_push = os.clock()
+  feed(revert, envI35, ctxI35, key(0x2F))
+  req_state = "done"
+  result_body = '{"choices":[{"message":{"content":"XYZ"}}]}'
+  combined_return = 2
+  feed(revert, envI35, ctxI35, key(0x87))
+  rec("I35_pending", tostring(envI35.ai_pending_insert ~= nil))
+  rec("I35_calls_first", tostring(#combined))
+  rec("I35_last_first", tostring(combined[#combined]))
+  rec("I35_log_deferred", tostring(log_has("insert deferred")))
+  feed(revert, envI35, ctxI35, key(0x87))
+  rec("I35_calls", tostring(#combined))
+  rec("I35_last", tostring(combined[#combined]))
+  rec("I35_pending_after", tostring(envI35.ai_pending_insert ~= nil))
+  rec("I35_log_inserted", tostring(log_has("inserted")))
+  revert.fini(envI35)
+end
 
 -- I21: 正文先上屏、末尾的问号单独上屏 -> 整句照删（问号那条不算"正文"）
 logs = {}
@@ -1200,6 +1270,7 @@ rec("I21_reqs", tostring(#requests))
 rec("I21_user", requests[1] and last_user(requests[1].body) or "-")
 rec("I21_injected", table.concat(injected, ","))
 rec("I21_send_text", table.concat(sends, "|"))
+rec("I21_combined", combined and combined[#combined] or "")
 rec("I21_log_skip", tostring(log_has("replace skipped")))
 revert.fini(envI21)
 
@@ -1303,6 +1374,7 @@ req_state = "done"
 result_body = '{"choices":[{"message":{"content":"XYZ"}}]}'
 rec("I26_tick_ret", tostring(feed(revert, envI26, ctxI26, key(0xFFD5))))
 rec("I26_send_text", table.concat(sends, ","))
+rec("I26_combined", combined and combined[#combined] or "")
 revert.fini(envI26)
 
 -- I26b: 唤醒键还在等（running）-> 排下一轮唤醒，别让链子断
@@ -1482,6 +1554,7 @@ envI14.ai_typing_until = nil   -- 测试里跳过“结果正在打字”窗口
 rec("I14_reqs", tostring(#requests))
 rec("I14_injected", table.concat(injected, ","))
 rec("I14_send_text", table.concat(sends, "|"))
+rec("I14_combined", combined and combined[#combined] or "")
 revert.fini(envI14)
 
 -- I15: 有编码时第一下 / 放行（万象快符靠这一下），第二下才发送并把那个字符摘掉
@@ -1836,6 +1909,84 @@ else
 end
 
 -- =====================================================================
+-- I36. 日志开关：默认只写 error，actions/debug: true 才写 info
+-- =====================================================================
+do
+  local cfgI36 = cfg_plain({ ["actions/trigger"] = "qq/", ["actions/shortcuts"] = "zz" })
+  local envI36 = new_env(cfgI36)
+
+  revert.set_debug(false)
+  logs = {}
+  revert.init(envI36)
+  rec("I36_debug", tostring(envI36.revert_debug))
+  rec("I36_no_info", tostring(not log_has("mode=")))
+  rec("I36_error_kept", tostring(log_has("bad shortcut entry ignored")))
+
+  revert.set_debug(true)
+  logs = {}
+  revert.init(envI36)
+  rec("I36_debug_on", tostring(envI36.revert_debug))
+  rec("I36_info_back", tostring(log_has("mode=")))
+  revert.fini(envI36)
+end
+
+-- =====================================================================
+-- I37. 快符补记：engine:commit_text 打出来的符号只进 commit_history，
+--      开了 actions/history_ledger 也要进账本、能回删
+-- =====================================================================
+do
+  -- 场景 E 把 package.loaded["actions"] 清过（故意测加载失败），这里放回桩
+  package.loaded["actions"] = mod
+  local cnt = {}
+  mod.press_backspace = function(n) cnt[#cnt + 1] = n return n end
+
+  local cfgI37 = cfg_plain({ ["actions/trigger"] = "qq/" })
+  local envI37, ctxI37 = new_env(cfgI37)
+  revert.init(envI37)
+  rec("I37_hist_ready", tostring(envI37.hist_ready))
+
+  commit(ctxI37, "海南有多大面积")
+  quick(ctxI37, "？")
+  rec("I37_ret", type_text(revert, envI37, ctxI37, "qq/"))
+  rec("I37_injected", table.concat(cnt, ","))
+  rec("I37_stack", tostring(#envI37.revert_stack))
+
+  -- 同一笔不重复记：正常上屏只算一次
+  cnt = {}
+  commit(ctxI37, "abc")
+  type_text(revert, envI37, ctxI37, "qq/")
+  rec("I37b_injected", table.concat(cnt, ","))
+  revert.fini(envI37)
+
+  -- 关掉开关：退回只靠上屏通知，符号漏掉（回删少一个字）
+  local cfgI37c = cfg_plain({ ["actions/trigger"] = "qq/", ["actions/history_ledger"] = false })
+  local envI37c, ctxI37c = new_env(cfgI37c)
+  cnt = {}
+  revert.init(envI37c)
+  rec("I37c_hist_ready", tostring(envI37c.hist_ready))
+  commit(ctxI37c, "海南有多大面积")
+  quick(ctxI37c, "？")
+  type_text(revert, envI37c, ctxI37c, "qq/")
+  rec("I37c_injected", table.concat(cnt, ","))
+  revert.fini(envI37c)
+
+  -- 历史只有 20 条：写满之后仍然能跟进
+  local cfgI37d = cfg_plain({ ["actions/trigger"] = "qq/" })
+  local envI37d, ctxI37d = new_env(cfgI37d)
+  cnt = {}
+  revert.init(envI37d)
+  for i = 1, 18 do ctxI37d.commit_history:push("x") end
+  type_text(revert, envI37d, ctxI37d, "q")
+  rec("I37d_stack", tostring(#envI37d.revert_stack))
+  quick(ctxI37d, "？")
+  type_text(revert, envI37d, ctxI37d, "q")
+  rec("I37d_latest", tostring((envI37d.revert_stack[#envI37d.revert_stack] or {}).text))
+  revert.fini(envI37d)
+
+  mod.press_backspace = function(n) injected[#injected + 1] = n return n end
+end
+
+-- =====================================================================
 -- F. end-to-end async path, using the counting-only dry-run dll
 -- =====================================================================
 logs = {}                           -- only look at what F itself logs
@@ -1846,6 +1997,7 @@ if ds then package.cpath = package.cpath:sub(1, ds - 1) .. package.cpath:sub(de 
 rime_api.get_user_data_dir = function() return USERDIR_DRY end
 
 local revertF = assert(loadfile(ACTIONS_PATH))()
+revertF.set_debug(true)   -- F 段重新 load 了一遍，开关要重新打开
 local envF, ctxF = new_env(nil)
 revertF.init(envF)
 local modF = package.loaded["actions"]
@@ -2169,7 +2321,8 @@ def main():
         "I3_enter": "2,2,1",
         "I3_reqs": "1",
         "I3_injected": "3",
-        "I3_send_text": "XYZ",
+        "I3_send_text": "",
+        "I3_combined": "3:XYZ",
         "I4_injected": "[]",
         "I4_send_text": "XYZ",
         "I5_log_failed": "true",
@@ -2205,16 +2358,27 @@ def main():
         "I19_after_mark": "我出门了",
         "I19_three": "第二句第三句",
         "I20_injected": "10",
-        "I20_send_text": "XYZ",
+        "I20_send_text": "",
+        "I20_combined": "10:XYZ",
         "I20_log_skip": "false",
         "I20b_reqs": "1",
         "I20b_user": "我出门了",
         "I20b_injected": "4",
-        "I20b_send_text": "XYZ",
+        "I20b_send_text": "",
+        "I20b_combined": "4:XYZ",
         "I21_reqs": "1",
         "I21_user": "福建的美食有哪些",
         "I21_injected": "9",
-        "I21_send_text": "XYZ",
+        "I21_send_text": "",
+        "I21_combined": "9:XYZ",
+        "I35_pending": "true",
+        "I35_calls_first": "1",
+        "I35_last_first": "5:XYZ",
+        "I35_log_deferred": "true",
+        "I35_calls": "2",
+        "I35_last": "5:XYZ",
+        "I35_pending_after": "false",
+        "I35_log_inserted": "true",
         "I21_log_skip": "false",
         "I12_reqs": "0",
         "I12_log": "true",
@@ -2232,7 +2396,8 @@ def main():
   "I26_reqs": "1",
   "I26_nudge_first": "350/135",
   "I26_tick_ret": "1",
-  "I26_send_text": "XYZ",
+  "I26_send_text": "",
+        "I26_combined": "7:XYZ",
   "I26b_reqs": "1",
   "I26b_nudge_again": "350/135",
   "I27_reqs": "1",
@@ -2255,7 +2420,8 @@ def main():
         "I13_include_marks": "我出门了，。",
         "I14_reqs": "1",
         "I14_injected": "6",
-        "I14_send_text": "XYZ",
+        "I14_send_text": "",
+        "I14_combined": "6:XYZ",
         "I15_pass": "2",
         "I15_reqs": "0",
         "I15_second": "1",
@@ -2303,6 +2469,22 @@ def main():
         "I33_injected": "",
         "I34_log_bad": "true",
         "I34_injected": "",
+        # I36: 日志开关（生产默认只写 error）
+        "I36_debug": "false",
+        "I36_no_info": "true",
+        "I36_error_kept": "true",
+        "I36_debug_on": "true",
+        "I36_info_back": "true",
+        # I37: 快符补记（commit_history）
+        "I37_hist_ready": "true",
+        "I37_ret": "2,2,1",
+        "I37_injected": "1",
+        "I37_stack": "1",
+        "I37b_injected": "3",
+        "I37c_hist_ready": "false",
+        "I37c_injected": "7",
+        "I37d_stack": "18",
+        "I37d_latest": "？",
         # E: broken dll_dir
         "E_good_entry_removed": "true",
         "E_cpath_clean": "true",
