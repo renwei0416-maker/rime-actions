@@ -1,12 +1,14 @@
 /*
  * rime-actions / 上屏动作 —— Windows 专用 Lua C 模块（x64）。
  *
- * 对外提供十个函数：
+ * 对外提供十二个函数：
  *   press_backspace(count)             删除 count 个字符（连续退格）
  *   press_keys(spec[, gap_ms])         发一串按键组合；gap_ms 为相邻按键事件之间的间隔
  *   open_url(url)                      用默认浏览器打开网址（仅 http/https）
  *   send_text(utf8)                    把文本逐字打到光标处（不经过剪贴板）
- *   clipboard_get()                    读剪贴板里的文本
+ *   clipboard_get()                    同步读剪贴板里的文本
+ *   clipboard_request()                让后台线程去读剪贴板（按键回调里用这个）
+ *   clipboard_take()                   取回 clipboard_request 的结果
  *   http_request(url, body, headers)   异步 HTTP(S) POST，立即返回序号
  *   http_state()                       查询请求状态与序号
  *   http_result()                      取回响应体或错误
@@ -42,8 +44,11 @@
  *   press_keys      —— 1 已排队；2 被忽略（上一个还在发 / 距上次太近）；0 参数非法。
  *   open_url        —— 1 已排队；2 被忽略；0 参数非法（空串、过长、非 http/https）。
  *                      地址里的中文需由调用方先做 UTF-8 percent-encode。
- *   send_text       —— 1 已排队；0 参数非法（空串或超过 20000 字节）。
+ *   send_text       —— 1 已排队；2 上一段文字还在打；0 参数非法（空串或超过 20000 字节）。
  *   clipboard_get   —— 文本 + nil；失败时 nil + 错误说明。
+ *   clipboard_request —— 1 已排队去读；2 上一次还没取走；0 起不了后台线程。
+ *   clipboard_take  —— 读好了：文本 + nil；失败：nil + 错误说明；还没好：nil + nil。
+ *                      取走即清空，第二次调用会回到"还没好"。
  *   http_request    —— 正数 = 本次请求序号；-1 = 上一个请求还没回来；
  *                      0 = 参数非法（URL 协议/长度、body 或 headers 超长）。
  *   http_state      —— 状态字符串（running / done / failed / idle）+ 序号。
@@ -79,6 +84,7 @@
 #define BATCH_GAP_MS     5  /* 批与批之间歇多久 */
 #define MIN_INTERVAL_MS 150 /* 距上次注入不足这个时间的新请求直接丢弃 */
 #define WORKER_POLL_MS   5  /* 后台线程轮询待发槽位的间隔 */
+#define WORKER_EXIT_WAIT_MS 2000 /* DLL 卸载时最多等后台线程多久 */
 #define STEP_GAP_MS     30  /* 默认按键间隔：相邻两个按键事件之间歇多久 */
 #define MAX_KEY_GAP_MS 500  /* 按键间隔的防呆上限（毫秒） */
 
@@ -95,6 +101,7 @@ static volatile LONG      g_pending_gap   = STEP_GAP_MS;     /* kind==2 时相�
 static volatile LONG      g_busy       = 0;
 static volatile ULONGLONG g_last_start = 0;
 static PVOID              g_worker     = NULL;
+static volatile LONG      g_stop       = 0;   /* DLL 卸载时置 1，让后台线程自己收摊 */
 
 /* 离线自测专用：用 -DACTIONS_DRY_RUN 另编一份"只记不发"的 dll 来验证
  * 异步流程与按键序列，正式 dll 不含任何测试钩子（下面这些 #ifdef 都不会编进去）。 */
@@ -520,12 +527,19 @@ static void open_url_now(const char *url)
 }
 
 /* 后台线程：只在这里发按键 */
+static void clip_read_now(void); /* 定义在"剪贴板"一节 */
+
 static DWORD WINAPI worker_main(LPVOID param)
 {
     (void)param;
 
     for (;;) {
-        LONG kind = InterlockedExchange(&g_pending_kind, 0);
+        LONG kind;
+
+        if (g_stop)
+            break;
+
+        kind = InterlockedExchange(&g_pending_kind, 0);
 
         if (kind > 0) {
             LONG count = InterlockedExchange(&g_pending_count, 0);
@@ -536,6 +550,8 @@ static DWORD WINAPI worker_main(LPVOID param)
                 inject_keys(g_pending_spec, (int)InterlockedExchange(&g_pending_gap, STEP_GAP_MS));
             else if (kind == 3)
                 open_url_now(g_pending_url);
+            else if (kind == 4)
+                clip_read_now();
             InterlockedExchange(&g_busy, 0);
         } else {
             Sleep(WORKER_POLL_MS);
@@ -544,7 +560,9 @@ static DWORD WINAPI worker_main(LPVOID param)
     return 0;
 }
 
-/* 首次使用时才创建后台线程，返回是否可用 */
+/* 首次使用时才创建后台线程，返回是否可用。
+ * 线程先以挂起状态建出来，抢占成功才让它跑；抢占失败就直接终结掉这条还没跑过的线程，
+ * 避免出现两条同时轮询的 worker。 */
 static BOOL ensure_worker(void)
 {
     HANDLE thread;
@@ -552,13 +570,22 @@ static BOOL ensure_worker(void)
     if (g_worker)
         return TRUE;
 
-    thread = CreateThread(NULL, 0, worker_main, NULL, 0, NULL);
+    thread = CreateThread(NULL, 0, worker_main, NULL, CREATE_SUSPENDED, NULL);
     if (!thread)
         return FALSE;
 
-    if (InterlockedCompareExchangePointer((PVOID volatile *)&g_worker, thread, NULL) != NULL)
-        CloseHandle(thread); /* 另一个线程先建好了 */
+    if (InterlockedCompareExchangePointer((PVOID volatile *)&g_worker, thread, NULL) != NULL) {
+        /* 另一个线程先建好了：这条还没跑过，直接终结 + 关句柄 */
+        TerminateThread(thread, 0);
+        CloseHandle(thread);
+        return TRUE;
+    }
 
+    if (ResumeThread(thread) == (DWORD)-1) {
+        InterlockedCompareExchangePointer((PVOID volatile *)&g_worker, NULL, thread);
+        CloseHandle(thread);
+        return FALSE;
+    }
     return TRUE;
 }
 
@@ -807,6 +834,9 @@ static int l_dry_run_gap(lua_State *L)
 
 static volatile LONG g_http_state = HTTP_IDLE;
 static volatile LONG g_http_seq   = 0;
+/* 请求代号：每次发起或取消都加一。后台线程跑完时若代号已经变了，
+ * 说明这次的结果没人要了（被取消或被新请求取代），直接丢掉。 */
+static volatile LONG g_http_gen   = 0;
 static char          *g_http_result = NULL;   /* DONE 时有效，malloc 的 */
 static size_t         g_http_result_len = 0;
 static char           g_http_error[512];
@@ -846,6 +876,7 @@ typedef struct {
     DWORD body_len;
     char *headers;
     LONG  seq;
+    LONG  gen;
 } http_job;
 
 /* 真正发请求（只在后台线程里跑，阻塞无所谓） */
@@ -943,8 +974,12 @@ static void http_do_request(http_job *job, char **out_body, size_t *out_len, cha
         goto done;
     }
 
-    WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                        WINHTTP_HEADER_NAME_BY_INDEX, &status, &status_len, WINHTTP_NO_HEADER_INDEX);
+    if (!WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                             WINHTTP_HEADER_NAME_BY_INDEX, &status, &status_len,
+                             WINHTTP_NO_HEADER_INDEX)) {
+        snprintf(err, errcap, "读状态码失败，GetLastError=%lu", GetLastError());
+        goto done;
+    }
 
     for (;;) {
         DWORD avail = 0;
@@ -1018,16 +1053,22 @@ static DWORD WINAPI http_thread_main(LPVOID param)
     http_do_request(job, &body, &len, err, sizeof(err));
 
     EnterCriticalSection(&g_http_lock);
-    if (body) {
-        if (g_http_result)
-            free(g_http_result);
-        g_http_result = body;
-        g_http_result_len = len;
-        g_http_error[0] = '\0';
-        InterlockedExchange(&g_http_state, HTTP_DONE);
+    if (job->gen == g_http_gen) {
+        if (body) {
+            if (g_http_result)
+                free(g_http_result);
+            g_http_result = body;
+            g_http_result_len = len;
+            g_http_error[0] = '\0';
+            InterlockedExchange(&g_http_state, HTTP_DONE);
+        } else {
+            snprintf(g_http_error, sizeof(g_http_error), "%s", err[0] ? err : "未知错误");
+            InterlockedExchange(&g_http_state, HTTP_FAILED);
+        }
     } else {
-        snprintf(g_http_error, sizeof(g_http_error), "%s", err[0] ? err : "未知错误");
-        InterlockedExchange(&g_http_state, HTTP_FAILED);
+        /* 已被取消或被新请求取代：结果没人要，释放掉，状态由取消方负责 */
+        free(body);
+        body = NULL;
     }
     LeaveCriticalSection(&g_http_lock);
 
@@ -1057,7 +1098,7 @@ static int l_http_request(lua_State *L)
         lua_pushinteger(L, 0);
         return 1;
     }
-    if (!strstr(url, "http://") && !strstr(url, "https://")) {
+    if (strncmp(url, "http://", 7) != 0 && strncmp(url, "https://", 8) != 0) {
         lua_pushinteger(L, 0);
         return 1;
     }
@@ -1067,6 +1108,25 @@ static int l_http_request(lua_State *L)
     }
 
     http_lock_init();
+
+    /* 上一轮的结果如果没人取过（Esc 取消后线程才跑完、或取结果那步被跳过了），
+     * 状态会停在 DONE/FAILED，下面的 CAS 就永远失败——表现是"从此再也发不出去"。
+     * 这里先把陈旧结果清掉。 */
+    {
+        LONG stale = g_http_state;
+        if (stale == HTTP_DONE || stale == HTTP_FAILED) {
+            EnterCriticalSection(&g_http_lock);
+            if (g_http_result) {
+                free(g_http_result);
+                g_http_result = NULL;
+                g_http_result_len = 0;
+            }
+            g_http_error[0] = '\0';
+            LeaveCriticalSection(&g_http_lock);
+            InterlockedCompareExchange(&g_http_state, HTTP_IDLE, stale);
+        }
+    }
+
     if (InterlockedCompareExchange(&g_http_state, HTTP_RUNNING, HTTP_IDLE) != HTTP_IDLE) {
         lua_pushinteger(L, -1);
         return 1;
@@ -1093,6 +1153,7 @@ static int l_http_request(lua_State *L)
 
     seq = InterlockedIncrement(&g_http_seq);
     job->seq = seq;
+    job->gen = InterlockedIncrement(&g_http_gen);
 
     th = CreateThread(NULL, 0, http_thread_main, job, 0, NULL);
     if (!th) {
@@ -1156,7 +1217,9 @@ static int l_http_result(lua_State *L)
     return 2;
 }
 
-/* http_cancel() -> 1（有东西被丢掉）| 0 */
+/* http_cancel() -> 1（确实丢掉了一个结果/取消了一个请求）| 0
+ * 请求还在跑时也能取消：把代号加一，后台线程跑完后会自己丢弃结果，
+ * 状态立刻回到 idle，所以取消之后马上就能再发。 */
 static int l_http_cancel(lua_State *L)
 {
     LONG st = g_http_state;
@@ -1171,7 +1234,12 @@ static int l_http_cancel(lua_State *L)
         }
         g_http_error[0] = '\0';
         LeaveCriticalSection(&g_http_lock);
+        InterlockedIncrement(&g_http_gen);
         InterlockedExchange(&g_http_state, HTTP_IDLE);
+        dropped = 1;
+    } else if (st == HTTP_RUNNING) {
+        InterlockedIncrement(&g_http_gen);
+        InterlockedCompareExchange(&g_http_state, HTTP_IDLE, HTTP_RUNNING);
         dropped = 1;
     }
     lua_pushinteger(L, dropped);
@@ -1180,52 +1248,176 @@ static int l_http_cancel(lua_State *L)
 
 /* ==================================================================
  * 剪贴板
- *   clipboard_get() -> 文本, nil  |  nil, 错误
+ *   clipboard_request() -> 1=已排队  2=忙（上一个还在读）  0=起不了线程
+ *   clipboard_take()    -> 文本, nil | nil, 错误 | nil, nil（还没好）
+ *   clipboard_get()     -> 文本, nil | nil, 错误      （同步版，保留兼容）
+ *
+ * 按键回调里不能同步读剪贴板：别的程序占着剪贴板时 OpenClipboard 会一直等，
+ * 输入法就冻住了。所以正常流程走 request/take，真正的读取在后台线程里做；
+ * 而且 OpenClipboard 失败只重试有限次（约 200ms）就放弃。
  * ================================================================== */
-static int l_clipboard_get(lua_State *L)
+#define CLIP_MAX_BYTES  (128 * 1024)
+#define CLIP_OPEN_RETRY 20
+#define CLIP_OPEN_GAP_MS 10
+
+#define CLIP_IDLE    0
+#define CLIP_PENDING 1
+#define CLIP_READY   2
+#define CLIP_FAILED  3
+
+static char             g_clip_text[CLIP_MAX_BYTES + 1];
+static size_t           g_clip_len = 0;
+static char             g_clip_error[128];
+static volatile LONG    g_clip_state = CLIP_IDLE;
+static CRITICAL_SECTION g_clip_lock;
+static volatile LONG    g_clip_lock_ready = 0;
+
+static void clip_lock_init(void)
+{
+    if (InterlockedCompareExchange(&g_clip_lock_ready, 1, 0) == 0)
+        InitializeCriticalSection(&g_clip_lock);
+}
+
+/* 读剪贴板：成功返回 malloc 的 UTF-8（调用方 free），失败返回 NULL 并写 err */
+static char *clip_read_text(char *err, size_t errcap)
 {
     HANDLE h;
     WCHAR *w;
-    int need;
+    int need, i;
     char *u;
 
-    if (!OpenClipboard(NULL)) {
-        lua_pushnil(L);
-        lua_pushliteral(L, "打不开剪贴板");
-        return 2;
+    for (i = 0; i < CLIP_OPEN_RETRY; ++i) {
+        if (OpenClipboard(NULL))
+            break;
+        Sleep(CLIP_OPEN_GAP_MS);
     }
+    if (i >= CLIP_OPEN_RETRY) {
+        snprintf(err, errcap, "打不开剪贴板");
+        return NULL;
+    }
+
     h = GetClipboardData(CF_UNICODETEXT);
     if (!h) {
         CloseClipboard();
-        lua_pushnil(L);
-        lua_pushliteral(L, "剪贴板里没有文本");
-        return 2;
+        snprintf(err, errcap, "剪贴板里没有文本");
+        return NULL;
     }
     w = (WCHAR *)GlobalLock(h);
     if (!w) {
         CloseClipboard();
-        lua_pushnil(L);
-        lua_pushliteral(L, "读剪贴板失败");
-        return 2;
+        snprintf(err, errcap, "读剪贴板失败");
+        return NULL;
     }
 
     need = WideCharToMultiByte(CP_UTF8, 0, w, -1, NULL, 0, NULL, NULL);
     u = (char *)malloc((size_t)(need > 0 ? need : 1));
-    if (!u) {
-        GlobalUnlock(h);
-        CloseClipboard();
-        lua_pushnil(L);
-        lua_pushliteral(L, "内存不足");
-        return 2;
-    }
-    if (need > 0)
+    if (u && need > 0)
         WideCharToMultiByte(CP_UTF8, 0, w, -1, u, need, NULL, NULL);
-
     GlobalUnlock(h);
     CloseClipboard();
 
-    lua_pushlstring(L, u, (size_t)(need > 0 ? need - 1 : 0));
-    free(u);
+    if (!u) {
+        snprintf(err, errcap, "内存不足");
+        return NULL;
+    }
+    return u;
+}
+
+/* 后台线程里调用：把结果放进槽位 */
+static void clip_read_now(void)
+{
+    char err[128];
+    char *text;
+    size_t len = 0;
+
+    err[0] = '\0';
+    text = clip_read_text(err, sizeof(err));
+
+    clip_lock_init();
+    EnterCriticalSection(&g_clip_lock);
+    if (text) {
+        len = strlen(text);
+        if (len > CLIP_MAX_BYTES)
+            len = CLIP_MAX_BYTES;
+        memcpy(g_clip_text, text, len);
+        g_clip_text[len] = '\0';
+        g_clip_len = len;
+        g_clip_error[0] = '\0';
+    } else {
+        g_clip_len = 0;
+        g_clip_text[0] = '\0';
+        snprintf(g_clip_error, sizeof(g_clip_error), "%s", err[0] ? err : "读剪贴板失败");
+    }
+    LeaveCriticalSection(&g_clip_lock);
+
+    free(text);
+    InterlockedExchange(&g_clip_state, text ? CLIP_READY : CLIP_FAILED);
+}
+
+static int l_clipboard_request(lua_State *L)
+{
+    if (InterlockedCompareExchange(&g_clip_state, CLIP_PENDING, CLIP_IDLE) != CLIP_IDLE) {
+        lua_pushinteger(L, 2);
+        return 1;
+    }
+    if (!claim_slot()) {
+        InterlockedExchange(&g_clip_state, CLIP_IDLE);
+        lua_pushinteger(L, 2);
+        return 1;
+    }
+    if (!ensure_worker()) {
+        InterlockedExchange(&g_busy, 0);
+        InterlockedExchange(&g_clip_state, CLIP_IDLE);
+        lua_pushinteger(L, 0);
+        return 1;
+    }
+    InterlockedExchange(&g_pending_kind, 4);
+    lua_pushinteger(L, 1);
+    return 1;
+}
+
+static int l_clipboard_take(lua_State *L)
+{
+    LONG st = g_clip_state;
+
+    clip_lock_init();
+    if (st == CLIP_READY) {
+        EnterCriticalSection(&g_clip_lock);
+        lua_pushlstring(L, g_clip_text, g_clip_len);
+        g_clip_len = 0;
+        g_clip_text[0] = '\0';
+        LeaveCriticalSection(&g_clip_lock);
+        InterlockedExchange(&g_clip_state, CLIP_IDLE);
+        lua_pushnil(L);
+        return 2;
+    }
+    if (st == CLIP_FAILED) {
+        EnterCriticalSection(&g_clip_lock);
+        lua_pushnil(L);
+        lua_pushstring(L, g_clip_error[0] ? g_clip_error : "读剪贴板失败");
+        LeaveCriticalSection(&g_clip_lock);
+        InterlockedExchange(&g_clip_state, CLIP_IDLE);
+        return 2;
+    }
+    lua_pushnil(L);
+    lua_pushnil(L);
+    return 2;
+}
+
+static int l_clipboard_get(lua_State *L)
+{
+    char err[128];
+    char *text;
+
+    err[0] = '\0';
+    text = clip_read_text(err, sizeof(err));
+    if (!text) {
+        lua_pushnil(L);
+        lua_pushstring(L, err[0] ? err : "读剪贴板失败");
+        return 2;
+    }
+    lua_pushlstring(L, text, strlen(text));
+    free(text);
     lua_pushnil(L);
     return 2;
 }
@@ -1300,12 +1492,15 @@ static int l_nudge(lua_State *L)
 
 /* ==================================================================
  * 直接插入文本
- *   send_text(utf8[, delay_ms]) -> 1=已安排
+ *   send_text(utf8) -> 1=已安排  2=上一段还在打  0=参数或线程问题
  *
  * 用 SendInput 的"Unicode 字符"模式把整段文字打进当前窗口（相当于逐个
  * 字符输入，但不经过输入法、不碰剪贴板）。
  * 和 press_keys 一样必须在后台线程里延时再发：正在处理按键时注入会重入。
+ * 一次只允许一段文字在打，两段交叉会把字打乱。
  * ================================================================== */
+static volatile LONG g_text_busy = 0;
+
 static DWORD WINAPI send_text_thread(LPVOID param)
 {
     char *text = (char *)param;
@@ -1333,6 +1528,7 @@ static DWORD WINAPI send_text_thread(LPVOID param)
     }
     free(w);
     free(text);
+    InterlockedExchange(&g_text_busy, 0);
     return 0;
 }
 
@@ -1347,8 +1543,13 @@ static int l_send_text(lua_State *L)
         lua_pushinteger(L, 0);
         return 1;
     }
+    if (InterlockedCompareExchange(&g_text_busy, 1, 0) != 0) {
+        lua_pushinteger(L, 2);
+        return 1;
+    }
     copy = (char *)malloc(len + 1);
     if (!copy) {
+        InterlockedExchange(&g_text_busy, 0);
         lua_pushinteger(L, 0);
         return 1;
     }
@@ -1358,6 +1559,7 @@ static int l_send_text(lua_State *L)
     th = CreateThread(NULL, 0, send_text_thread, copy, 0, NULL);
     if (!th) {
         free(copy);
+        InterlockedExchange(&g_text_busy, 0);
         lua_pushinteger(L, 0);
         return 1;
     }
@@ -1371,6 +1573,8 @@ static const luaL_Reg module_functions[] = {
     {"press_keys",      l_press_keys},
     {"open_url",        l_open_url},
     {"clipboard_get",   l_clipboard_get},
+    {"clipboard_request", l_clipboard_request},
+    {"clipboard_take",    l_clipboard_take},
     {"nudge",           l_nudge},
     {"send_text",       l_send_text},
     {"http_request",    l_http_request},
@@ -1390,7 +1594,43 @@ static const luaL_Reg module_functions[] = {
 
 EXPORT int luaopen_actions(lua_State *L)
 {
+    luaL_checkversion_(L, LUA_VERSION_NUM, LUAL_NUMSIZES);
     http_lock_init();
     luaL_newlib(L, module_functions);
     return 1;
+}
+
+/* ==================================================================
+ * DLL 生命周期
+ *   卸载（小狼毫退出、升级、重新部署）时给后台线程发停止信号，
+ *   最多等 WORKER_EXIT_WAIT_MS 让它自己收摊，然后关掉句柄。
+ *   这里处在加载器锁里，所以只做"有界等待"：等不到就放它走，
+ *   不做无限 join，避免把进程退出流程卡死。
+ * ================================================================== */
+static void worker_shutdown(void)
+{
+    HANDLE th = (HANDLE)InterlockedExchangePointer((PVOID volatile *)&g_worker, NULL);
+
+    if (!th)
+        return;
+
+    InterlockedExchange(&g_stop, 1);
+    WaitForSingleObject(th, WORKER_EXIT_WAIT_MS);
+    CloseHandle(th);
+}
+
+BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved)
+{
+    (void)reserved;
+
+    if (reason == DLL_PROCESS_ATTACH) {
+        DisableThreadLibraryCalls(instance);
+    } else if (reason == DLL_PROCESS_DETACH) {
+        worker_shutdown();
+        if (InterlockedExchange(&g_http_lock_ready, 0) == 1)
+            DeleteCriticalSection(&g_http_lock);
+        if (InterlockedExchange(&g_clip_lock_ready, 0) == 1)
+            DeleteCriticalSection(&g_clip_lock);
+    }
+    return TRUE;
 }

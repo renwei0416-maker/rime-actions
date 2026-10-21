@@ -13,6 +13,7 @@
 | 组合键 | `Ctrl+/` | 同上，改用组合键触发 |
 | 快捷触发码 | `z;`、`ss;`、`f;` | 替你按常用快捷键（撤销、选到行首、搜索…） |
 | AI 模式 | `ai;` 进入，打字后连按两下 `/` | 把文字发给模型，回复直接写到光标处 |
+| 剪贴板 | AI 模式下 `Ctrl+Alt+;` | 把剪贴板里的文字直接发给模型（`actions/ai/clip_key` 可改） |
 
 内置 26 项快捷触发码（默认不启用，写上 `"actions/shortcuts": "@defaults"` 才生效）：
 
@@ -75,13 +76,11 @@ python tests\smoke_backspace.py
 ```
 
 需要 Python 3.12、MSYS2 mingw64 gcc、装好的小狼毫。脚本先现编一份 `-DACTIONS_DRY_RUN`
-的"只记账、不注入"的 dll，再跑 265 项断言（触发码、记账、去抖、26 项快捷键、多步、
+的"只记账、不注入"的 dll，再跑 350 项断言（触发码、记账、去抖、26 项快捷键、多步、
 删到符号、浏览器搜索、AI、配置校验）。路径可用环境变量覆盖：
 `MINGW_BIN`、`WEASEL_DIR`、`RIME_DLL`、`DLLDIR`。
 
-> 脚本进程退出时可能返回 `0xC0000005`，那是 dry-run dll 后台线程在进程退出阶段的已知竞态
-> （`lua_close: clean` 与 `ALL PASS` 都已打印）。以输出里的
-> `CHECKS: 265 asserted, ALL PASS` 为准。
+全部通过时输出 `CHECKS: 350 asserted, ALL PASS`，进程退出码 0。
 
 ## 限制
 

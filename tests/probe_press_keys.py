@@ -7,10 +7,11 @@ import os
 import subprocess
 import sys
 import time
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-BASE = r"C:\Users\Administrator\Desktop\Ai_Work\DSH_harness\backspace-build"
+BASE = _ROOT
 MINGW_BIN = r"C:\msys64\mingw64\bin"
 WEASEL_DIR = r"C:\Program Files\Rime\weasel-0.17.4"
 RIME = os.path.join(WEASEL_DIR, "rime.dll")

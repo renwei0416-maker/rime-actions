@@ -18,9 +18,11 @@ window only; ASCII output.
 import ctypes as C
 
 import probe_inject_variants as P
+import os
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 RIME = r"C:\Program Files\Rime\weasel-0.17.4\rime.dll"
-DLL = r"C:\Users\Administrator\Desktop\Ai_Work\DSH_harness\backspace-build\actions.dll"
+DLL = os.path.join(_ROOT, "actions.dll")
 
 D = C.CDLL(RIME)
 D.luaL_newstate.restype = C.c_void_p

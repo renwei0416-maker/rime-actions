@@ -64,6 +64,8 @@ local DEFAULTS = {
     ai_enabled     = false,
     ai_send_key    = "/",
     ai_double_ms   = 1000,
+    ai_clip_key    = "ctrl+alt+semicolon",
+    ai_clip_max_chars = 4000,
     ai_source      = "auto",
     ai_marks       = "。！？",
     ai_include_marks = false,
@@ -99,6 +101,7 @@ local LIMITS = {
     key_gap_ms     = 500,
 
     ai_double_ms   = 5000,
+    ai_clip_max_chars = 20000,
     ai_history_chars = 5000,
     ai_nudge_key   = 255,
     ai_nudge_interval = 60000,
@@ -152,7 +155,11 @@ local load_error = nil
 -- 键名表（必须和 actions.c 里认的那套一致，否则这里会误判成"配置写错"）
 -- ===========================================================================
 local KEY_NAMES = {
-    backspace = 0x08, tab = 0x09, ["return"] = 0x0D, escape = 0x1B, space = 0x20,
+    -- 非打印键用 X11 keysym（Rime 的按键码就是 keysym，不是 Windows 的 VK）
+    backspace = 0xFF08, tab = 0xFF09, ["return"] = 0xFF0D, enter = 0xFF0D,
+    escape = 0xFF1B, space = 0x20, delete = 0xFFFF, insert = 0xFF63,
+    home = 0xFF50, ["end"] = 0xFF57, pageup = 0xFF55, pagedown = 0xFF56,
+    left = 0xFF51, up = 0xFF52, right = 0xFF53, down = 0xFF54,
     exclam = 0x21, quotedbl = 0x22, numbersign = 0x23, dollar = 0x24, percent = 0x25,
     ampersand = 0x26, apostrophe = 0x27, parenleft = 0x28, parenright = 0x29,
     asterisk = 0x2A, plus = 0x2B, comma = 0x2C, minus = 0x2D, period = 0x2E, slash = 0x2F,
@@ -300,6 +307,8 @@ end
 -- 这里只是提前把写错的配置捞出来（报错+不生效），真正解析仍在 dll 里做。
 local function valid_key_spec(spec)
     if type(spec) ~= "string" or spec == "" then return false end
+    -- 逗号分隔每一步：空步（开头、结尾、连写）都不算合法
+    if spec:find("^,") or spec:find(",$") or spec:find(",,", 1, true) then return false end
 
     for step in spec:gmatch("[^,]+") do
         -- 多余的 +：开头、结尾、连写
@@ -368,19 +377,18 @@ local function parse_shortcuts(spec, env)
     if type(spec) ~= "string" or spec == "" then return {} end
 
     local entries = {}
-    if spec:find("@defaults", 1, true) then
-        for _, item in ipairs(DEFAULT_SHORTCUTS) do
-            entries[#entries + 1] = { trigger = item[1], action = item[2] }
-        end
-    end
-
-    local rest = spec:gsub("@defaults", " ")
-    for token in rest:gmatch("%S+") do
-        local trigger, action = token:match("^([^=]+)=(.+)$")
-        if trigger and action then
-            entries[#entries + 1] = { trigger = trigger, action = action }
-        elseif log and log.error then
-            log.error("actions.lua: bad shortcut entry ignored (want 触发码=动作): " .. token)
+    for token in spec:gmatch("%S+") do
+        if token == "@defaults" then
+            for _, item in ipairs(DEFAULT_SHORTCUTS) do
+                entries[#entries + 1] = { trigger = item[1], action = item[2] }
+            end
+        else
+            local trigger, action = token:match("^([^=]+)=(.+)$")
+            if trigger and action then
+                entries[#entries + 1] = { trigger = trigger, action = action }
+            elseif log and log.error then
+                log.error("actions.lua: bad shortcut entry ignored (want 触发码=动作): " .. token)
+            end
         end
     end
 
@@ -478,6 +486,14 @@ local function trim_stack(env)
     end
 end
 
+local function ai_preview(text, limit)
+    if type(text) ~= "string" then return "" end
+    limit = limit or 40
+    if (utf8.len(text) or 0) <= limit then return text end
+    local stop = utf8.offset(text, limit + 1)
+    return stop and (text:sub(1, stop - 1) .. "…") or text
+end
+
 local function on_commit(text, env)
     if not text or text == "" then return end
 
@@ -487,15 +503,26 @@ local function on_commit(text, env)
     local stack = env.revert_stack
     if not stack then return end
 
-    -- 结果打进光标的那些字会一个个重新变成"上屏"，标成 ai，免得当成用户自己打的
+    -- 结果打进光标的字会重新变成"上屏"，标成 ai；只认答案里当前位置上的那一段，
+    -- 位置对不上的一律算用户自己打的（同一串字出现在答案里也不会被误判）
     local own = nil
     if env.ai_last_text and env.ai_typing_until
-        and os.clock() <= env.ai_typing_until + 2
-        and env.ai_last_text:find(text, 1, true) then
-        own = true
+        and os.clock() <= env.ai_typing_until + 2 then
+        local pos = env.ai_text_pos or 1
+        if env.ai_last_text:sub(pos, pos + #text - 1) == text then
+            own = true
+            env.ai_text_pos = pos + #text
+        end
+    end
+
+    if log and log.info and env.ai_mode then
+        log.info(string.format("actions.lua: commit n=%d own=%s text=%s",
+            length, tostring(own), ai_preview(text, 16)))
     end
 
     stack[#stack + 1] = { n = length, text = text, ai = own }
+    -- 这笔文字一上屏，之前按过的回车就都跑到它前面去了，不再算"光标前的空行"
+    env.ai_newlines = 0
     trim_stack(env)
 end
 
@@ -560,8 +587,23 @@ local function inject_backspaces(env, count)
     if type(result) == "number" and result >= 1 and result <= count then
         accepted = result
     end
+    if accepted < count and log and log.info then
+        log.info(string.format("actions.lua: dll accepted %d of %d backspaces", accepted, count))
+    end
     consume_from_stack(env, accepted)
     return true
+end
+
+-- 按 max_backspaces 截断后注入；label 只用于超限日志
+local function run_delete(env, count, label)
+    local limit = env.revert_limit or DEFAULTS.max_backspaces
+    if count > limit then
+        if log and log.info then
+            log.info(string.format("actions.lua: %s truncated to max_backspaces=%d", label, limit))
+        end
+        count = limit
+    end
+    return inject_backspaces(env, count)
 end
 
 -- 删掉最近一笔上屏（文本触发码 / 组合键 / @delete 都走这里）
@@ -576,17 +618,8 @@ local function fire_delete(env)
         return
     end
 
-    local limit = env.revert_limit or DEFAULTS.max_backspaces
     local count = entry.n
-    if count > limit then
-        if log and log.info then
-            log.info(string.format(
-                "actions.lua: commit of %d chars truncated to max_backspaces=%d", count, limit))
-        end
-        count = limit
-    end
-
-    inject_backspaces(env, count)
+    run_delete(env, count, string.format("commit of %d chars", count))
 end
 
 -- 删到光标前第一个"符号"为止（@to-symbol / @to-symbol-include）
@@ -628,18 +661,8 @@ local function fire_to_symbol(env, include)
         return
     end
 
-    local limit = env.revert_limit or DEFAULTS.max_backspaces
-    if need > limit then
-        if log and log.info then
-            log.info(string.format(
-                "actions.lua: %d chars to the previous symbol truncated to max_backspaces=%d",
-                need, limit))
-        end
-        need = limit
-    end
-
     -- 成功注入后 consume_from_stack 已经按"实际删掉的字符数"扣过账了
-    inject_backspaces(env, need)
+    run_delete(env, need, string.format("%d chars to the previous symbol", need))
 end
 
 -- 发一串原生按键（快捷键动作）
@@ -756,11 +779,18 @@ local function ai_trim(text)
     return (text:gsub("^%s+", ""):gsub("%s+$", ""))
 end
 
+-- 有没有汉字：基本区 U+4E00–U+9FFF 与扩展 A 区 U+3400–U+4DBF；
+-- 全角标点（，。！？等）不算汉字
 local function ai_has_cjk(text)
-    if type(text) ~= "string" then return false end
-    for i = 1, #text do
-        local b = text:byte(i)
-        if b and b >= 0xE4 and b <= 0xE9 then return true end
+    local chars = to_chars(text)
+    if not chars then return false end
+    for _, ch in ipairs(chars) do
+        local ok, cp = pcall(utf8.codepoint, ch)
+        if ok and cp then
+            if (cp >= 0x4E00 and cp <= 0x9FFF) or (cp >= 0x3400 and cp <= 0x4DBF) then
+                return true
+            end
+        end
     end
     return false
 end
@@ -771,7 +801,7 @@ local function ai_safe_str(fn)
     return ""
 end
 
--- 输入框里已经拼好的文字：优先取含汉字的那个，都没有才退回编码本身
+-- 日志里只放前 limit 个字，别把整段正文写进日志
 local function ai_composition_text(ctx)
     if not ctx then return "" end
 
@@ -807,24 +837,120 @@ local function ai_mark_set(text)
     return set
 end
 
--- 已经上屏过的内容（从旧到新拼起来），默认跳过 AI 自己打进去的那些
-local function ai_history_text(env)
-    local stack = env.revert_stack or {}
-    local parts = {}
-    for i = 1, #stack do
-        local entry = stack[i]
-        if entry and type(entry.text) == "string" and entry.text ~= ""
-            and not (env.ai_skip_own and entry.ai) then
-            parts[#parts + 1] = entry.text
+-- 最近这一段的原文：从账本尾部往前拼上屏的文字，拼到已经出现断句符为止
+-- （末尾那串符号不算断句符）。遇到 AI 自己写进去的那条也停：前面是本轮回答，
+-- 不属于用户这次的输入。
+-- 倒序排列的字符里，跳过末尾那串断句符/符号/空白之后，前面还有没有断句符
+local function ai_has_mark_before_tail(rev, marks, symbols)
+    if not marks or not rev then return false end
+    local j = 1
+    while j <= #rev do
+        local ch = rev[j]
+        if (marks[ch] ~= nil) or (symbols and symbols[ch] ~= nil)
+            or (ch:match("^%s$") ~= nil) then
+            j = j + 1
+        else
+            break
         end
     end
-    return table.concat(parts)
+    for x = j, #rev do
+        if marks[rev[x]] ~= nil then return true end
+    end
+    return false
+end
+
+local function ai_current_text(env)
+    local stack = env.revert_stack or {}
+    local symbols = env.revert_symbols or make_symbol_set(DEFAULTS.symbols)
+    local marks = env.ai_marks
+    local parts, rev, total = {}, {}, 0
+    for i = #stack, 1, -1 do
+        local entry = stack[i]
+        if entry and type(entry.text) == "string" and entry.text ~= "" then
+            if env.ai_skip_own and entry.ai then break end
+            table.insert(parts, 1, entry.text)
+            total = total + #entry.text
+            local chars = to_chars(entry.text)
+            if chars then
+                -- rev 是倒序（新的在前）
+                for k = #chars, 1, -1 do rev[#rev + 1] = chars[k] end
+                -- 末尾那串断句符/符号/空白跳过后，前面还有断句符就到此为止
+                if ai_has_mark_before_tail(rev, marks, symbols) then break end
+            end
+            if total >= 2000 then break end
+        end
+    end
+    return table.concat(parts, "")
+end
+
+-- 上下文一律按"字"算（history_chars 也是字数）
+local function ai_chars(text)
+    if type(text) ~= "string" then return 0 end
+    return utf8.len(text) or #text
+end
+
+local ai_last_sentence
+
+-- 之前已经答过的问答：往回找 AI 写进去的那一条当答案，它前面连续上屏的非 AI 内容当问题
+-- （问题可能分几次上屏，所以往回拼到断句符为止，规则与"要发的句子"一致）；总字数不超过 budget
+local function ai_history_pairs(env, budget)
+    local stack = env.revert_stack or {}
+    local out = {}
+    local used = 0
+    local i = #stack
+    local marks, symbols = env.ai_marks, env.ai_symbols
+    local include = env.ai_include_marks
+
+    while i >= 1 do
+        local answer = stack[i]
+        if answer and answer.ai and type(answer.text) == "string" and answer.text ~= "" then
+            local parts, oldest = {}, nil
+            local revc = {}
+            local j = i - 1
+            while j >= 1 do
+                local entry = stack[j]
+                if not entry or entry.ai or type(entry.text) ~= "string" or entry.text == "" then
+                    break
+                end
+                parts[#parts + 1] = entry.text
+                oldest = j
+                local chars = to_chars(entry.text)
+                if chars then
+                    for k = #chars, 1, -1 do revc[#revc + 1] = chars[k] end
+                end
+                if #parts >= 2 and ai_has_mark_before_tail(revc, marks, symbols) then
+                    break
+                end
+                j = j - 1
+            end
+
+            if oldest then
+                local joined = {}
+                for k = #parts, 1, -1 do joined[#joined + 1] = parts[k] end
+                local question = ai_last_sentence(table.concat(joined), marks, symbols, include)
+                local need = ai_chars(question) + ai_chars(answer.text)
+                if used + need > budget then break end
+                if question ~= "" then
+                    used = used + need
+                    table.insert(out, 1, { q = question, a = answer.text })
+                    i = oldest - 1
+                else
+                    i = i - 1
+                end
+            else
+                i = i - 1
+            end
+        else
+            i = i - 1
+        end
+    end
+    return out
 end
 
 -- 从后往前找最后一个分隔符，取它之后的内容；一个都没有就整段都要
 -- 返回：要发的句子、如果 replace 要往回删几个字符、断句点之前的上文、以及"断句点之后到末尾"
 -- 的原文（replace 只在这一段没有换行时才动手）
-local function ai_last_sentence(text, marks, symbols, include_marks)
+ai_last_sentence = function(text, marks, symbols, include_marks)
     local chars = to_chars(text)
     if not chars or #chars == 0 then return "", 0, "", "" end
 
@@ -979,7 +1105,8 @@ local function parse_send_key(spec)
     return { code = code, char = (#spec == 1) and spec or nil }
 end
 
-local function ai_send_now(env)
+-- preset_text 不为空时：直接发这段文字（读剪贴板那条路用），不取编码/上屏记录
+local function ai_send_now(env, preset_text)
     if env.ai_req then
         if log and log.info then
             log.info("actions.lua: ai: previous request still running, not sending again")
@@ -996,14 +1123,21 @@ local function ai_send_now(env)
     end
 
     local text, replace, cut, before, span
-    if source == "composition" then
+    if preset_text then
+        text = preset_text
+        replace = false
+        cut = 0
+        before = ""
+        span = ""
+    elseif source == "composition" then
         text = ai_composition_text(ctx)
         replace = false
         cut = 0
         before = ""
         span = ""
     else
-        text, cut, before, span = ai_last_sentence(ai_history_text(env), env.ai_marks,
+        local recent = ai_current_text(env)
+        text, cut, before, span = ai_last_sentence(recent, env.ai_marks,
                                                    env.revert_symbols or make_symbol_set(DEFAULTS.symbols),
                                                    env.ai_include_marks)
         replace = env.ai_replace and true or false
@@ -1018,7 +1152,8 @@ local function ai_send_now(env)
     end
 
     -- 没有汉字就不值得发（比如刚上屏的是个符号）；输入框里自己打的拼音不算
-    if source ~= "composition" and not ai_has_cjk(text) then
+    -- 剪贴板那条路不设这道门：复制来的英文/代码也要能发（比如 eng; 模式）
+    if not preset_text and source ~= "composition" and not ai_has_cjk(text) then
         if log and log.info then
             log.info("actions.lua: ai: nothing to send (no 汉字 in the committed text)")
         end
@@ -1034,7 +1169,7 @@ local function ai_send_now(env)
     end
 
     -- 输入框里的内容已经"发走"了，不再留在屏幕上
-    if source == "composition" and composing then ctx:clear() end
+    if not preset_text and source == "composition" and composing then ctx:clear() end
 
     local prompt = env.ai_mode and env.ai_mode.prompt or "default"
     local system_prompt = (env.ai_prompts and (env.ai_prompts[prompt] or env.ai_prompts.default)) or ""
@@ -1044,12 +1179,23 @@ local function ai_send_now(env)
         history = ai_tail(before, env.ai_history_chars)
     end
 
+    -- 之前答过的问答作为真正的对话轮次带上；没答过的旧文字不算上文
+    local turns = {}
+    if not preset_text and source == "committed" and (env.ai_history_chars or 0) > 0 then
+        local budget = (env.ai_history_chars or 0) - ai_chars(history)
+        if budget > 0 then turns = ai_history_pairs(env, budget) end
+    end
+
     local parts = {}
     parts[#parts + 1] = '{"model":"' .. json_escape(env.ai_model or "") .. '","messages":['
     if system_prompt ~= "" then
         local sys = system_prompt
         if history ~= "" then sys = sys .. "\n\n【上文】" .. history end
         parts[#parts + 1] = '{"role":"system","content":"' .. json_escape(sys) .. '"},'
+    end
+    for _, turn in ipairs(turns) do
+        parts[#parts + 1] = '{"role":"user","content":"' .. json_escape(turn.q) .. '"},'
+        parts[#parts + 1] = '{"role":"assistant","content":"' .. json_escape(turn.a) .. '"},'
     end
     parts[#parts + 1] = '{"role":"user","content":"' .. json_escape(text) .. '"}],'
     parts[#parts + 1] = string.format('"max_tokens":%d,"temperature":%.2f',
@@ -1084,18 +1230,137 @@ local function ai_send_now(env)
         text    = text,
         prompt  = prompt,
         replace = replace,
-        cut     = replace and cut or 0,
+        -- 光标前的回车不进记账，但挡在光标和原句之间，删的时候一起算掉
+        cut     = replace and (cut + (env.ai_newlines or 0)) or 0,
         span    = span or "",
         started = os.clock(),
     }
     if log and log.info then
-        log.info(string.format("actions.lua: ai: sent %d chars (prompt=%s, source=%s)",
-            utf8.len(text) or #text, prompt, source))
+        log.info(string.format("actions.lua: ai: sent %d chars (prompt=%s, source=%s, replace=%d, text=%s)",
+            utf8.len(text) or #text, prompt, source,
+            env.ai_req.cut, ai_preview(text, 40)))
     end
     if env.ai_nudge and Actions.nudge then
         env.ai_nudged = os.clock()
         Actions.nudge(env.ai_nudge_interval or DEFAULTS.ai_nudge_interval, env.ai_nudge_key)
     end
+end
+
+-- 读剪贴板当"要发的内容"：用户自己 Ctrl+C 复制，脚本只负责读出来发出去。
+-- 读剪贴板要开剪贴板，被别的程序占着时会一直等，所以不能放在按键回调里同步做：
+-- 先在后台线程读（clipboard_request），读好了靠唤醒键回来取（clipboard_take）。
+local CLIP_TIMEOUT_S = 5
+
+local function ai_clip_received(env, text)
+    env.ai_clip_started = nil
+
+    text = ai_trim(text)
+    if text == "" then
+        if log and log.info then
+            log.info("actions.lua: ai: nothing to send (clipboard is empty)")
+        end
+        return
+    end
+
+    local limit = env.ai_clip_max or DEFAULTS.ai_clip_max_chars
+    local total = utf8.len(text) or #text
+    local head = head_of({ n = total, text = text }, limit)
+    if head and head.n < total then
+        if log and log.info then
+            log.info(string.format(
+                "actions.lua: ai: clipboard truncated to %d chars", limit))
+        end
+        text = head.text
+    end
+
+    ai_send_now(env, text)
+end
+
+local function ai_send_clip(env)
+    if env.ai_req then
+        if log and log.info then
+            log.info("actions.lua: ai: previous request still running, not sending again")
+        end
+        return
+    end
+    if env.ai_clip_started then
+        if log and log.info then
+            log.info("actions.lua: ai: clipboard is still being read, not asking again")
+        end
+        return
+    end
+    if not Actions or not Actions.clipboard_request then
+        if log and log.error then
+            log.error("actions.lua: ai: dll 里没有 clipboard_request")
+        end
+        return
+    end
+
+    local ok, ret = pcall(Actions.clipboard_request)
+    if not ok then
+        if log and log.error then
+            log.error("actions.lua: ai: clipboard_request failed: " .. tostring(ret))
+        end
+        return
+    end
+    if ret == 2 then
+        if log and log.info then
+            log.info("actions.lua: ai: clipboard is busy, not reading again")
+        end
+        return
+    end
+    if ret ~= 1 then
+        if log and log.error then
+            log.error("actions.lua: ai: clipboard_request refused (the worker thread cannot start)")
+        end
+        return
+    end
+
+    env.ai_clip_started = os.clock()
+    if env.ai_nudge and Actions.nudge then
+        env.ai_nudged = os.clock()
+        Actions.nudge(env.ai_nudge_interval or DEFAULTS.ai_nudge_interval, env.ai_nudge_key)
+    end
+end
+
+-- 唤醒键回来时调用：读好了就发出去。返回 true 表示还在等后台读。
+local function ai_clip_poll(env)
+    if not env.ai_clip_started then return false end
+    if not Actions or not Actions.clipboard_take then
+        env.ai_clip_started = nil
+        if log and log.error then
+            log.error("actions.lua: ai: dll 里没有 clipboard_take")
+        end
+        return false
+    end
+
+    local ok, text, err = pcall(Actions.clipboard_take)
+    if not ok then
+        env.ai_clip_started = nil
+        if log and log.error then
+            log.error("actions.lua: ai: clipboard_take failed: " .. tostring(text))
+        end
+        return false
+    end
+    if type(text) == "string" then
+        ai_clip_received(env, text)
+        return false
+    end
+    if err then
+        env.ai_clip_started = nil
+        if log and log.info then
+            log.info("actions.lua: ai: nothing to send (clipboard: " .. tostring(err) .. ")")
+        end
+        return false
+    end
+    if os.clock() - env.ai_clip_started > CLIP_TIMEOUT_S then
+        env.ai_clip_started = nil
+        if log and log.info then
+            log.info("actions.lua: ai: clipboard read timed out")
+        end
+        return false
+    end
+    return true
 end
 
 -- 轮询后台请求；返回 true = 这一次有了结论（成功或失败）
@@ -1107,6 +1372,8 @@ local function ai_take(env)
     if not ok then return false end
 
     if state == "running" then
+        -- os.clock() 是进程启动以来的秒数，约 49.7 天后回绕成 0；
+        -- 这里只比较几秒到几分钟的差值，回绕最多让一次等待提前收场
         if (env.ai_max_wait_s or 0) > 0
             and (os.clock() - (req.started or os.clock())) > env.ai_max_wait_s then
             if Actions.http_cancel then pcall(Actions.http_cancel) end
@@ -1148,17 +1415,39 @@ local function ai_take(env)
         return true
     end
 
-    -- 开了 replace：先把原文删掉——从光标往回删到"上一组符号"之后，也就是删掉那一整句
-    -- 连同它末尾的那串符号；这一段里有换行就不删（跨行不动）
-    if req.replace and req.cut and req.cut > 0
-        and not (req.span or ""):find("\n", 1, true) then
-        inject_backspaces(env, req.cut)
+    -- 开了 replace：先把原句删掉再插回答。删的范围和"发给 AI 的那一句"一致——
+    -- 从光标往回删到上一个 sentence_marks 符号为止（符号之后的内容连末尾那串标点一起删）。
+    -- 删的这段里有换行就不删（跨行不动）。
+    if req.replace and req.cut and req.cut > 0 then
+        if (req.span or ""):find("\n", 1, true) then
+            if log and log.info then
+                log.info("actions.lua: ai: replace skipped (spans a line break)")
+            end
+        else
+            -- 输入框里还压着没上屏的编码时先清掉：否则第一个退格会被输入法拿去删编码，
+            -- 正文就少删一个字
+            local ctx = env.engine and env.engine.context
+            if ctx and ctx.clear and ctx:is_composing() then ctx:clear() end
+            if log and log.info then
+                log.info(string.format("actions.lua: ai: replace %d chars (span=%s, text=%s)",
+                    req.cut, ai_preview(req.span, 24), ai_preview(req.text, 40)))
+            end
+            inject_backspaces(env, req.cut)
+            -- 原句连同光标前的回车一起删掉了，计数清零
+            env.ai_newlines = 0
+        end
     end
 
     local sent, send_err = pcall(Actions.send_text, content)
     if not sent then
         if log and log.error then
             log.error("actions.lua: ai: send_text failed: " .. tostring(send_err))
+        end
+        return true
+    end
+    if send_err == 2 then
+        if log and log.info then
+            log.info("actions.lua: ai: send_text ignored (上一段文字还在打)")
         end
         return true
     end
@@ -1169,6 +1458,7 @@ local function ai_take(env)
     -- 刚打进去的字会一个个重新经过输入法：在这个窗口里把它们当普通正文放过去，
     -- 不要当成触发码/发送键（正文里有 / 或者 ; 时会被自己触发）
     env.ai_last_text = content
+    env.ai_text_pos = 1
     env.ai_typing_until = os.clock() + 0.25 + 0.002 * math.max(#content, 1) + 0.5
     env.ai_last_push = nil
 
@@ -1201,16 +1491,27 @@ local function ai_toggle(env, prompt)
     end
 end
 
+-- 配置里写的是 Windows 虚拟键码（发给 dll 用），Rime 给的却是 keysym，
+-- 认键的时候两种都要认（如 F24：配置 0x87，Rime 报 0xFFD5）
+local function vk_to_keysym(vk)
+    if vk >= 0x70 and vk <= 0x87 then return 0xFFBE + (vk - 0x70) end   -- F1..F24
+    if vk >= 0x41 and vk <= 0x5A then return vk + 0x20 end               -- A..Z
+    if vk >= 0x30 and vk <= 0x39 then return vk end                      -- 0..9
+    if vk == 0x20 then return 0x20 end                                   -- 空格
+    return nil
+end
+
 -- 按键入口：返回 1/2 表示"这一键我处理了/我没处理"，返回 nil 表示交给主流程
 local function ai_handle_key(key, env)
     local kc = key.keycode
 
     -- 唤醒键：把结果取回来；还在等就再约一次
-    if kc == env.ai_nudge_key then
+    if kc == env.ai_nudge_key or kc == vk_to_keysym(env.ai_nudge_key) then
         ai_take(env)
+        local waiting_clip = ai_clip_poll(env)
         -- 续约：一次唤醒最多排一次，且只按"按下"排。抬起事件也走到这里，
         -- 如果两边都排，唤醒键的个数每轮翻一倍。
-        if env.ai_req and env.ai_nudge and Actions.nudge and not key:release() then
+        if (env.ai_req or waiting_clip) and env.ai_nudge and Actions.nudge and not key:release() then
             local now = os.clock()
             local interval = (env.ai_nudge_interval or DEFAULTS.ai_nudge_interval) / 1000
             if not env.ai_nudged or (now - env.ai_nudged) >= interval * 0.9 then
@@ -1232,7 +1533,7 @@ local function ai_handle_key(key, env)
     end
 
     if env.ai_req and ai_take(env) then
-        -- 取回结果的那一下不算"连按发送的第一下"：否则接下来的 / 会立刻再发一条
+        -- 取回结果的那一下不算"连按发送的第一下"
         env.ai_last_push = nil
         if env.ai_send and not env.ai_send.combo and kc == env.ai_send.code then
             return kAccepted
@@ -1264,6 +1565,12 @@ local function ai_handle_key(key, env)
 
     if not env.ai_mode or not env.ai_send then return nil end
 
+    -- 剪贴板发送：只在 AI 模式下生效（用当前模式的提示词）
+    if env.ai_clip and hotkey_matches(key, env.ai_clip) then
+        ai_send_clip(env)
+        return kAccepted
+    end
+
     if env.ai_send.combo then
         if hotkey_matches(key, env.ai_send.combo) then
             ai_send_now(env)
@@ -1283,7 +1590,9 @@ local function ai_handle_key(key, env)
             env.ai_last_push = nil
             if composing and env.ai_send.char then
                 local inp = ctx.input or ""
-                if inp:sub(-1) == env.ai_send.char and #inp > 1 and ctx.pop_input then
+                -- 编码里只剩这个字符时也要摘掉，否则它留在输入法里，第一个退格会被
+                -- 输入法拿去删它，正文里就少删一个字
+                if inp:sub(-1) == env.ai_send.char and #inp >= 1 and ctx.pop_input then
                     ctx:pop_input(1)
                 end
             end
@@ -1345,6 +1654,27 @@ local function init_ai(env, config)
     if provider ~= "local" then provider = "online" end
     local prefix = "actions/ai/" .. provider .. "/"
 
+    -- 读剪贴板发送：ctrl+alt+semicolon；写空、none、off 就是不启用
+    -- （这里直接读原值，cfg_string 会把空字符串当成"没配"从而回退成默认）
+    local clip_spec = config and config:get_string("actions/ai/clip_key")
+    if type(clip_spec) ~= "string" then clip_spec = DEFAULTS.ai_clip_key end
+    env.ai_clip = nil
+    local clip_lower = clip_spec:lower()
+    if clip_spec ~= "" and clip_lower ~= "none" and clip_lower ~= "off" then
+        env.ai_clip = parse_hotkey(clip_spec)
+        if not env.ai_clip and log and log.error then
+            log.error("actions.lua: ai: cannot parse actions/ai/clip_key: " .. tostring(clip_spec))
+        end
+    end
+    env.ai_clip_max = cfg_int(config, "actions/ai/clip_max_chars", DEFAULTS.ai_clip_max_chars,
+                              1, LIMITS.ai_clip_max_chars)
+    if env.ai_clip and not (Actions.clipboard_request and Actions.clipboard_take) then
+        env.ai_clip = nil
+        if log and log.error then
+            log.error("actions.lua: ai: clipboard sending disabled - dll 里没有 clipboard_request/clipboard_take")
+        end
+    end
+
     env.ai_send            = send
     env.ai_double_ms       = cfg_int(config, "actions/ai/double_ms", DEFAULTS.ai_double_ms,
                                      0, LIMITS.ai_double_ms)
@@ -1402,10 +1732,11 @@ local function init_ai(env, config)
     env.ai_enabled = true
     if log and log.info then
         log.info(string.format(
-            "actions.lua: ai enabled (send_key=%s double_ms=%d source=%s marks=%s nudge=%s provider=%s model=%s prompts=%s)",
+            "actions.lua: ai enabled (send_key=%s double_ms=%d source=%s marks=%s nudge=%s provider=%s model=%s clip_key=%s clip_max=%d prompts=%s)",
             send_spec, env.ai_double_ms, env.ai_source,
             cfg_string(config, "actions/ai/sentence_marks", DEFAULTS.ai_marks),
             env.ai_nudge and "on" or "off", provider, tostring(env.ai_model),
+            env.ai_clip and clip_spec or "-", env.ai_clip_max,
             table.concat((function()
                 local names = {}
                 for name in pairs(env.ai_prompts) do names[#names + 1] = name end
@@ -1513,6 +1844,17 @@ local function fini(env)
 end
 
 local function func(key, env)
+    -- 光标前的回车不会上屏（不进记账），但 replace 要从光标往回删，
+    -- 这些回车挡在光标和原句之间，先记下来，发送时并进删除长度里。
+    if env.ai_mode and not key:release()
+        and (key.keycode == 0xFF0D or key.keycode == 0xFF8D or key.keycode == 0x0D)
+        and not (key:ctrl() or key:alt() or key:super()) then
+        local ctx = env.engine.context
+        if not (ctx and ctx:is_composing()) then
+            env.ai_newlines = (env.ai_newlines or 0) + 1
+        end
+    end
+
     -- ---- 方式四：AI（默认关闭；没开就完全跳过）----
     if env.ai_enabled then
         local handled = ai_handle_key(key, env)

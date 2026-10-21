@@ -67,6 +67,11 @@ patch:
   #"actions/ai/online/base_url": "https://api.deepseek.com/chat/completions"
   #"actions/ai/online/model": "deepseek-chat"
   #"actions/shortcuts": "@defaults ai;=@ai eng;=@ai:eng jp;=@ai:jp"
+  #"actions/ai/send_key": "/"                   # 发送键：单字符=连按两下；组合键（如 ctrl+enter）=按一次
+  #"actions/ai/double_ms": 1000                 # 连按判定窗口（毫秒）
+  #"actions/ai/replace": false                  # true=先删掉要发的那句再写入结果
+  #"actions/ai/history_chars": 200              # 上下文预算（按字符算，0=不带上下文）
+  #"actions/ai/clip_key": "ctrl+alt+semicolon"  # 把剪贴板文字发给模型；写 "" 关闭
   # 自定义提示词：
   #"actions/ai/prompts/polish": "你是中文润色助手。把用户给的一句话改写得更通顺，只输出改写后的句子，不要解释。"
   #"actions/shortcuts": "@defaults p;=@ai:polish"

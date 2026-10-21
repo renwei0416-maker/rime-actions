@@ -7,11 +7,13 @@ import ctypes as C
 import hashlib
 import pathlib
 import sys
+import os
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 RIME = r"C:\Program Files\Rime\weasel-0.17.4\rime.dll"
-DLLDIR = r"C:\Users\Administrator\Desktop\Ai_Work\DSH_harness\backspace-build"
+DLLDIR = _ROOT
 DLL = pathlib.Path(DLLDIR) / "actions.dll"
 
 D = C.CDLL(RIME)

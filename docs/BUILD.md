@@ -59,7 +59,7 @@
 **v8 的关键改动：`-` 分步写法 + `f;` 用浏览器搜索最后一次上屏 + 默认表换成 26 项。**
 
 - 动作里 `-` 与 `,` **完全等价**：`shift+home-ctrl+c` 和 `shift+home,ctrl+c` 发的是同一串
-  （Lua 侧在 `actions.lua:340` 附近把 `-` 归一化成 `,`，C 侧一行没动）。所谓"放下再按下一步"
+  （Lua 侧在 `actions.lua:372` 附近把 `-` 归一化成 `,`，C 侧一行没动）。所谓"放下再按下一步"
   本来就是 C 侧多步的行为：每步内部是"修饰键按下 → 键按下 → 键抬起 → 修饰键逆序抬起"，
   步与步之间等 `STEP_GAP_MS 30` 毫秒
 - **要换新 dll**（36190 B）：C 侧新增 `open_url(url)`（`ShellExecuteW`，后台线程里调用，
@@ -87,11 +87,11 @@
 - **v9 也要换两个文件**：`actions.dll`（36734 B）+ `actions.lua`；配置里加
   `"actions/key_gap_ms": 30`（不写就是默认 30，行为与 v8 基本一致，只是同一组合键内部也按 30 ms 逐个发了）。
 
-- 触发方式：默认文本触发码 `qq/`（默认值在 `actions.lua:61` 的 `DEFAULTS`，`trigger` 在 `:62`，可用 `actions/trigger` 覆盖，
+- 触发方式：默认文本触发码 `qq/`（默认值在 `actions.lua:51` 的 `DEFAULTS`，`trigger` 在 `:52`，可用 `actions/trigger` 覆盖，
   写 `none`/`off`/`-` 即关闭）；可选组合键 `actions/hotkey`（默认空 = 不启用，填了与文本触发码**同时生效**）
 - 行为：触发后向当前窗口注入 N 次退格（`VK_BACK`），N = 上一次上屏的字符数（单次上限
   `actions/max_backspaces`，默认 500）
-- 参数全部可配（默认在 `actions.lua:61` 的 `DEFAULTS`，可用方案 / `custom.yaml` 覆盖，不用重编）：
+- 参数全部可配（默认在 `actions.lua:51` 的 `DEFAULTS`，可用方案 / `custom.yaml` 覆盖，不用重编）：
   `actions/trigger`、`actions/hotkey`、`actions/shortcuts`、`actions/search_url`、`actions/symbols`、
   `actions/dll_dir`、`actions/stack_size`、`actions/max_backspaces`、`actions/debounce_ms`、`actions/key_gap_ms`
 - 模块内部名必须是 `actions.dll`，入口 `luaopen_actions`
@@ -102,14 +102,14 @@
 
 | 文件 | 大小 | 说明 |
 | --- | --- | --- |
-| `actions.dll` | 89182 B | 模块本体，x64。sha256 `187dfb8568ccb57b3ff0d8f6ac136bff2253d333f28cf61335fb34d7bec556ae` |
-| `actions.c` | 46049 B | 编译用的 C 源（v10 起 = 上游 AI 版那份文件的**超集**：`press_backspace` + `press_keys` + `open_url` + 扫描码注入 + `send_events_spaced` + `http_*`/`clipboard_get`/`send_text`/`nudge`，diff 见第 2 节）。sha256 `184a924b0a9cc36af1f94870872dd88c81ad128b4ec59f6f23fb6a58d57ccaac` |
-| `actions.lua` | 60502 B | 配套 Lua **processor** 组件（`commit_notifier` 记账 + **四种触发方式可同时启用** + 26 项快捷键动作表 + `-`/`,` 多步 + 删到前一个符号 + `@search` 浏览器搜索 + 可配按键间隔 + **v10 的 AI 模式 `@ai`** + 可配置参数 + 被忽略时回填记录）。sha256 `c0e5a42bb8f044cacf58837b1d0c4f2f201cfe9372f72fcbac38aae55356cc4d` |
+| `actions.dll` | 92061 B | 模块本体，x64。sha256 `f0678b238749f5d9f4d2ef2261f5301aa3ca75aba7561f5fa258cf6981f79d4e` |
+| `actions.c` | 54817 B | 编译用的 C 源（v10 起 = 上游 AI 版那份文件的**超集**：`press_backspace` + `press_keys` + `open_url` + 扫描码注入 + `send_events_spaced` + `http_*`/`clipboard_get`/`send_text`/`nudge`，diff 见第 2 节）。sha256 `6430c1e27e94f060904fb71a7ccb3a79164e9a5d10d82a0c00e17e08c70c7677` |
+| `actions.lua` | 77175 B | 配套 Lua **processor** 组件（`commit_notifier` 记账 + **四种触发方式可同时启用** + 26 项快捷键动作表 + `-`/`,` 多步 + 删到前一个符号 + `@search` 浏览器搜索 + 可配按键间隔 + **v10 的 AI 模式 `@ai`** + 剪贴板发送 + 上下文按问答成对带上 + 多次上屏拼到断句符 + 后台读剪贴板 + 上下文按字计数 + 可配置参数 + 被忽略时回填记录）。sha256 `f4d1efd89cf8e09241c02bd1db887494b796342578ff248d87068402afcc43eb` |
 | `build.cmd` | 1626 B | 一键构建（ASCII + CRLF，已加 `-lshell32` 与 `-lwinhttp`）。sha256 `da3bcf2988aed5bfe414509f3a066d8a8337021dac5b26bd4fe050b27e0cb8ef` |
 | `include\lua.h` / `luaconf.h` / `lauxlib.h` | 16282 / 22044 / 9122 B | Lua 5.4.0 头文件，ABI 基准 |
 | `lib\rime-lua.def` + `lib\librime-lua.a` | 91 / 4672 B | 备选导入库（不想直接链 rime.dll 时用） |
 
-你原始的 `C:\Users\Administrator\Downloads\actions.c` **未改动**
+你原始的 `上游原始 actions.c` **未改动**
 （1139 B，sha256 `EF885BA3A26D3DA08A7FE76071337F9FDA84BB79EE4C0A05CA16D36B018033C9`）。
 上一版 Ctrl+Z 的交付仍在 `..\ctrlz-build\`，未被覆盖。
 
@@ -120,7 +120,7 @@
 - 删除 `l_press_ctrl_z()`（原来组 4 个 INPUT 发 Ctrl+Z）
 - 新增 `l_press_backspace()`（**不再在回调里同步发按键**）：
   - `lua_Integer count = luaL_optinteger(L, 1, 1);`（缺省 1 次），夹到 `[0, MAX_BACKSPACES]`
-    （`actions.c:35` `#define MAX_BACKSPACES 10000`，只用来拦 Lua 侧传错超大值；真正的
+    （`actions.c:74` `#define MAX_BACKSPACES 10000`，只用来拦 Lua 侧传错超大值；真正的
     策略上限是配置项 `actions/max_backspaces`，默认 500）
   - 忙标志（`InterlockedCompareExchange`）+ 距上次注入 150 ms 的窗口判定；不通过就返回 0
   - 通过则把数量写进"待发槽位"并返回该数量；后台线程（首次使用时 `CreateThread`）等 80 ms 后
@@ -129,19 +129,19 @@
 - `module_functions[]`：`{"press_ctrl_z", ...}` → `{"press_backspace", ...}`
 - `EXPORT int luaopen_actions` + `luaL_newlib` 未动；`#include` 未动
 - 离线自测另编一份带 `-DACTIONS_DRY_RUN` 的 dll（只数不发）；**正式 dll 里没有这个钩子**
-- **v6 新增 `l_press_keys()`**（`actions.c:484`）：发一串原生组合键，语法 `"ctrl+z"`、
+- **v6 新增 `l_press_keys()`**（`actions.c:638`）：发一串原生组合键，语法 `"ctrl+z"`、
   `"shift+home"`、`"ctrl+shift+k"`，多步用逗号 `"shift+home,shift+left"`。
   事件顺序是"修饰键先按下、键后按下、键先抬起、修饰键最后抬起"（v7 起 `ctrl+z` → `1Ds,2Cs,2Cs-up,1Ds-up`；
   v6 是只填 VK 的 `11,5A,5A-up,11-up`）。
   返回值：`1` 已排队 / `2` 被忽略（忙，或距上次注入不足 `MIN_INTERVAL_MS 150`）/ `0` 参数非法或解析失败。
-  上限：`MAX_SPEC_LEN 255`（`:67`）、`MAX_CHORD_EVENTS 12`（`:68`）、步与步之间等 `STEP_GAP_MS 30`（`:65`）；
-  键名解析在 `actions.c:307` 附近（只解析不发送），键名清单见文件头注释 `:8-20`。
+  上限：`MAX_SPEC_LEN 255`（`:86`）、`MAX_CHORD_EVENTS 12`（`:87`）、步与步之间等 `STEP_GAP_MS 30`（`:83`）；
+  键名解析在 `actions.c:232` 附近（只解析不发送），键名清单见文件头注释 `:4-56`。
 - v6 的 dry-run 钩子扩展成三个：`_dry_run_sent()`（`:523`）、`_dry_run_reset()`（`:530`）、
   `_dry_run_events()`（`:539`，返回 `"2Cs"`（按下）/ `"47sx-up"`（扩展键抬起）这种事件串；不带 `s`
   的是只填 `wVk` 的退格。v6 时代全是裸 VK，如 `"5A"`），存储用
   `g_dry_run_log[DRY_RUN_MAX_EVENTS][20]`（`:81-84`）；同样只在 `-DACTIONS_DRY_RUN` 的构建里存在。
 - 两层的严格程度不同（实际调用永远先过 Lua，所以只是备查）：C 层对"有空 token"的写法宽容
-  （`"ctrl+"`、`"+z"`、`"ctrl+z,"` 会被当合法并真的发键），把关的是 `actions.lua:220` 的
+  （`"ctrl+"`、`"+z"`、`"ctrl+z,"` 会被当合法并真的发键），把关的是 `actions.lua:308` 的
   `valid_key_spec()`（拒绝开头/结尾/连写的 `+`，且每个键名必须在白名单里）；`press_keys(nil)`
   由 `luaL_checkstring` 抛 `bad argument #1 (string expected)`。
 - **v7 新增 `fill_key()` / `vk_is_extended()`**（都在 `build_chord()` 前）：按键事件改用
@@ -173,18 +173,26 @@
     `http_state` → 状态串 + 序号；`http_result` → `body,nil` 或 `nil,错误`（取完回 idle）；
     `http_cancel` → 丢弃了 1 否则 0；`send_text` / `nudge` → 1 已排队 / 0 起不来
   - **头之间必须是真的 CRLF**：`WinHttpAddRequestHeaders` 按 CRLF 切行，写成字面 `\r\n`
-    会被当成一行怪名字丢掉（Lua 侧 `actions.lua:1015` 用的是 `table.concat(headers, "\r\n")`，
+    会被当成一行怪名字丢掉（Lua 侧 `actions.lua:1214` 用的是 `table.concat(headers, "\r\n")`，
     是真 CRLF，已用本机 HTTP 服务验证过）
-- **v10 的 Lua 侧（`@ai` 模式）**：`AI_PROMPTS`（`actions.lua:741`，default/eng/jp 三条）、
+- **v10 的 Lua 侧（`@ai` 模式）**：`AI_PROMPTS`（`actions.lua:760`，default/eng/jp 三条）、
   `ai_composition_text()`（commit → 候选 → preedit，优先取含汉字者）、`ai_history_text()`
-  （上屏记账拼"上文"，跳过 AI 自己写进去的那些）、`ai_last_sentence()`（`:829`，先把末尾那串符号
-  与空白跳过，再从后往前找最后一个 `。！？` 分隔符，找不到就整段）、`parse_send_key()`（`:911`，单字符=连按两下，
-  `ctrl+enter` 这类=按一次即发）、`ai_send_now()`（`:946`，判源 → 取文 → 组 JSON/headers →
-  `http_request` → 记 `env.ai_req` → `nudge`）、`ai_take()`（`:1046`，`http_state` 轮询：
+  （上屏记账拼"上文"，跳过 AI 自己写进去的那些）、`ai_last_sentence()`（`:892`，先把末尾那串符号
+  与空白跳过，再从后往前找最后一个 `。！？` 分隔符，找不到就整段）、`parse_send_key()`（`:1073`，单字符=连按两下，
+  `ctrl+enter` 这类=按一次即发）、`ai_send_now()`（`:1109`，判源 → 取文 → 组 JSON/headers →
+  `http_request` → 记 `env.ai_req` → `nudge`）、`ai_take()`（`:1367`，`http_state` 轮询：
   running 超时就 `http_cancel`，done/failed 就取结果 → 插入 / `replace` 时先删原文）、
-  `ai_handle_key()`（`:1133`，AI 模式下的按键状态机：唤醒键、Esc、发送键、换提示词）、
-  `init_ai()`（`:1204`，dll 能力检查 + 30 项配置）。`init/fini/func` 相应多了
-  `env.ai_enabled`、`http_cancel`、AI 分支（`actions.lua:1307` / `:1392` / `:1403`）。
+  `ai_handle_key()`（`:1505`，AI 模式下的按键状态机：唤醒键、Esc、发送键、换提示词）、
+  `ai_send_clip()`（`:1279`，先 `clipboard_request` 交给后台线程去读，再由 `ai_clip_poll()`（`:1327`）在唤醒键上取回并走 `ai_send_now(env, 文字)` 的同一条组包路径；
+  这条路径不设"必须有汉字"的门，剪贴板超长按 `clip_max_chars` 截断）、
+  `init_ai()`（`:1625`，dll 能力检查 + 32 项配置）。`init/fini/func` 相应多了
+  `env.ai_enabled`、`http_cancel`、AI 分支（`actions.lua:1750` / `:1835` / `:1846`）。
+
+- **v11 稳定性与一致性**（不改配置项名和默认值，`custom.yaml` 一行都不用改）：
+  - **C 侧**（`actions.c`）：① 后台线程有了收尾——`worker_main` 循环顶部判 `g_stop`，`DllMain(DLL_PROCESS_DETACH)` 里 `worker_shutdown()` 最多等 2000ms（`WORKER_EXIT_WAIT_MS`，`:82`），退出时不再出 `0xC0000005`；顺带 `DeleteCriticalSection` 两个锁。② HTTP 取消/超时不再卡死——`g_http_gen` 代号 + `l_http_cancel` 新增 running 分支；`l_http_request` 先清陈旧 DONE/FAILED 再 CAS。③ `ensure_worker` 用 `CREATE_SUSPENDED` + CAS，输家 `TerminateThread`，不会出现两条 worker。④ 剪贴板改成后台读：`clipboard_request()`（`:1352`，1 排队 / 2 忙 / 0 起不了线程）+ `clipboard_take()`（`:1374`，读好给文本、失败给错误、还没好给 nil,nil），`OpenClipboard` 最多重试 20×10ms（`CLIP_OPEN_RETRY`/`CLIP_OPEN_GAP_MS`，`:1255-1256`），按键回调里不再碰剪贴板；同步的 `clipboard_get()` 保留。⑤ `send_text` 一次只打一段，忙时返回 **2**（`g_text_busy`）。⑥ 协议判定改 `strncmp` 前缀匹配；`WinHttpQueryHeaders` 失败按失败收场（"读状态码失败"）。⑦ `luaopen_actions` 首行 `luaL_checkversion_`。
+  - **Lua 侧**（`actions.lua`）：① `history_chars` 改按**字符**计数（`ai_chars()`，`:887`；之前问答对按字节算，200 只够两轮中文）。② 历史里的问题也按"多笔上屏拼到断句符"取句——`ai_history_pairs()`（`:896`）遇到 `entry.ai` 当答案，往回拼多笔非 AI 上屏，再用 `ai_last_sentence()` 与发送时同一规则取句；`ai_has_mark_before_tail()` 从 `ai_current_text()` 里抽出来独立（`:844`，参数是倒序字符表）。③ `ai_has_cjk()`（`:784`）改按码点判断：基本区 U+4E00–U+9FFF 与扩展 A 区 U+3400–U+4DBF 才算汉字，全角标点不再算。④ `valid_key_spec()`（`:308`）拒绝空步：开头/结尾的逗号和连续逗号都算写坏，启动就记 `bad key sequence disabled`。⑤ `parse_shortcuts()`（`:376`）的 `@defaults` 改**整词**匹配，`@defaultsx` 不再展开默认表。⑥ 剪贴板发送改异步：`ai_send_clip()`（`:1279`）只 `clipboard_request` + `nudge`，`ai_clip_poll()`（`:1327`）在唤醒键上 `clipboard_take`，5 秒（`CLIP_TIMEOUT_S`，`:1252`）没读到就记 `clipboard read timed out`。⑦ `inject_backspaces()` 在 dll 只接受一部分时记 `dll accepted %d of %d backspaces`（仍以 dll 返回值为准扣账）。⑧ `send_text` 返回 2 时记 `send_text ignored (上一段文字还在打)`。
+  - **可见变化只有四处**：Esc 取消后可以立刻再发（不再等下一次唤醒）；剪贴板发送不再冻住输入法；`history_chars` 按字符算（同样的数字比以前多带约 3 倍中文）；分两次上屏的问题会拼成一句再进对话历史。配置校验更早更严（空步、`@defaultsx` 这类写法启动就报错并跳过该项）；退出最多慢 2 秒。
+  - **验证**：`smoke_backspace.py` 350 项断言 ALL PASS（退出码 0，不再有退出期 AV）；新增 `probe_http_cancel.py`（本机慢请求 → 取消 → 立刻重发）8 条 ALL PASS；新增 `probe_clipboard_async.py`（放已知文字 → `clipboard_request` → 轮询 `clipboard_take` → 校验 → 取空 → 清空后拿错误）ALL PASS；`probe_press_keys.py` / `probe_prod_dll.py` / `probe_ai_dll.py` / `probe_exit_av.py` 全部通过。
 
 ---
 
@@ -265,7 +273,7 @@ PE `Time/Date` 显示 1970-01-01）。
 
 ## 6. 验证情况：做了什么、没做什么
 
-验证脚本：`C:\Users\Administrator\Desktop\Ai_Work\DSH_harness\smoke_backspace.py`
+验证脚本：`tests\smoke_backspace.py`
 
 **已做（全部离线，且未注入任何一次按键）**
 
@@ -317,8 +325,9 @@ PE `Time/Date` 显示 1970-01-01）。
    | `press_keys` 返回 2 / 0 | 分别记 `press_keys ignored (previous burst still running or too soon)` / `press_keys refused the sequence: ctrl+z` | ✅ |
    | 同一个环境里三种触发方式同时配 | `mode=text+shortcuts`（含组合键时再加 `hotkey`），`qq/` 与 `z;` 都能用 | ✅ |
 
-   **265 项断言全部 PASS**，`lua_close` 干净（v5 72 项；v6 136 项；v8 再 +38 项；v9 再 +8 项；v10 场景 I 再 +61 项 + `replace` 再 +3 项 + 发送键放行再 +9 项 + 重复请求修复再 +6 项（I16）；
-   v10 的场景 I 再 +65 项）。
+   **350 项断言全部 PASS**，`lua_close` 干净（v5 72 项；v6 136 项；v8 再 +38 项；v9 再 +8 项；v10 场景 I 再 +61 项 + `replace` 再 +3 项 + 发送键放行再 +9 项；
+   v10 的场景 I 再 +65 项；剪贴板发送 +16 项；问答配对 +9 项；多次上屏拼接 +5 项；
+   末尾标点单独上屏时 replace 仍整句删 +5 项；replace 跨多次上屏删 +4 项；少删一个字 +6 项；回车键码修正 +5 项；唤醒键码修正 +6 项；v11 再 +12 项）。
 
    v10 新增的场景 I（AI 模式，12 组 61 条）覆盖：总开关关着时 `ai;` 不生效（`ai=off` +
    `ai shortcut ignored`）、`send_key` 默认 `/`（码 47）与 `double_ms=1000`、只发一个请求、
@@ -332,6 +341,22 @@ PE `Time/Date` 显示 1970-01-01）。
    以及断句（I13）：末尾那串符号整串跳过（`今天天气很好。我出门了，。` → 只发 `我出门了`）、
    句子之间连着一串 `。！？` 时取最后那句、整段只有符号时算"没内容"、`include_marks=true` 时
    额外把末尾那串符号补回去。
+   上下文（I18）：只把"之前答过的问答"按 `user`/`assistant` 两条消息带上（`system,user,assistant,user`）；
+   system 里不再平铺旧问题。
+   多次上屏拼接（I19）：分两次上屏的「最好吃的大米是」+「哪种？」发出去是
+   `最好吃的大米是哪种`；上一笔已带句号时只取句号之后（`我出门了`）；三笔连写中间没有断句符时
+   合成一句（`第二句第三句`）。`replace` 的删除范围和取文一致：跨多次上屏也删，删到上一个 `sentence_marks` 符号为止
+   （I20 两次上屏无断句符 → 全删；I20b 断句符在前一笔 → 只删符号之后那段）。
+   少删一个字（I22/I23/I24）：答案打完之后用户再打的同名单字不会被当成 AI 自己的输出
+   （`I22_user=中国有多少个市`、`I22_injected=8`）；发送前按过的回车也算进删除长度
+   （`I23_injected=9`，两个回车都算时 `I24_injected=5`）。
+   **回车键码**：Rime 给的是 X11 keysym —— `Return = 0xFF0D`、`KP_Enter = 0xFF8D`
+   （`RimeGetKeycodeByName` 实测），不是 Windows 的 `0x0D`；`I8`/`I23` 都用真实键码，
+   认非打印键名的 `actions/hotkey`（如 `Control+return`）同样按 keysym 匹配（`I25_injected=3`）。
+   **唤醒键**同理：`actions/ai/nudge_key: 135`（0x87）发给 dll 时是 Windows 虚拟键码，
+   而 Rime 送回来的 F24 是 keysym `0xFFD5`；只比 0x87 时唤醒链在第一个 tick 就断了，
+   结果要等用户随便按一个键才被取回（那个键还会插进正文，于是少删一个字）。
+   现在两种码都认（I26 唤醒链自成，I26b 还在等时续约下一轮）。
 
 6. **v7 扫描码修复的验证**（三层，都不碰你的前台窗口）：
 
@@ -383,13 +408,26 @@ PE `Time/Date` 显示 1970-01-01）。
 
    - **C 源超集核对**：把 v9 的 `actions.c`（797 行）按行序在上游那份（1393 行）里逐行查，
      797 行**全部命中、0 处不匹配** → 换文件是纯增量，我们原有行为一行没丢
-   - `..\smoke_backspace.py`：**259 项断言 ALL PASS**（v9 的 182 项一条没坏，场景 I 再 +77 项）
+   - `..\smoke_backspace.py`：**350 项断言 ALL PASS**（v9 的 182 项一条没坏，场景 I 再 +77 项，
+     剪贴板发送再 +16 项，问答配对上下文再 +9 项，多次上屏拼接再 +5 项，replace 跨多次上屏删再 +4 项，
+     少删一个字再 +6 项，v11 稳定性改造再 +12 项）
+   - `..\probe_http_cancel.py`（正式 dll + rime.dll 自带的 Lua，本机 127.0.0.1）：**8 条 ALL PASS** ——
+     起一个 3 秒才回的服务 → `http_request` 拿到 `slow_seq=1` → 状态 `running` → `http_cancel()` 返回 1
+     → 状态立刻回 `idle` → 马上再发一个快请求拿到 `fast_seq=2` → `done` → 取回 `{"ok":"/fast"}`。
+     这条用例证明取消之后不会永久 `-1`。
+   - `..\probe_clipboard_async.py`（正式 dll）：**7 条 ALL PASS** —— `clipboard_request`/`clipboard_take`
+     是 function；用 PowerShell 把已知文字放进剪贴板 → `request` 返 1 → 轮询 `take` 拿到全文 → 再取为
+     空（`nil,nil`）→ 清空剪贴板后拿到 `剪贴板里没有文本` → 同步老接口 `clipboard_get` 仍可用。
    - `..\probe_ai_dll.py`（正式 dll + rime.dll 自带的 Lua）：**24 条 ALL PASS** —— 7 个新函数
      都是 function；`http_request` 对空串/`ftp://` 返回 `0`；`send_text('')` 与 20001 字节返回 `0`；
      对**本脚本自己起的** `127.0.0.1` 服务真发一次 POST：`seq=1` → `done` → `http_result` 取回
      `{"choices":[{"message":{"content":"你好世界"}}]}` → 回到 `idle`，服务端收到了正确的
      path / body / `Authorization` 头；`HTTP 500` 走 `failed` 且错误串是 `HTTP 500: boom`；
      `clipboard_get` 在剪贴板为空时返回错误字符串；`nudge(-1, 0)` 回 `1`
+   - 剪贴板发送（I17）：AI 模式下按 `Ctrl+Alt+;` 把剪贴板内容当（要发的内容）；请求体里就是那段
+     文字、提示词仍是当前模式的；剪贴板为空不发（`nothing to send (clipboard: ...)`）；超过
+     `clip_max_chars` 按字符截断（`clipboard truncated to N chars`）；`clip_key` 写空则这一键
+     什么都不做（`ai_clip` 为 nil，按键继续往后传）
    - 探针边界：`send_text` **从不带正文调用**（会真的把字打进当前窗口），`nudge` 只发一次
      空键 F24，`clipboard_get` 只读不写
 
@@ -406,7 +444,7 @@ PE `Time/Date` 显示 1970-01-01）。
 
 1. **先停服务**：任务栏小狼毫图标右键 → 停止服务（或结束 `WeaselServer.exe`）。
    否则 `actions.dll` 正被加载，覆盖会失败（文件占用）。
-2. 覆盖到 `C:\Users\Administrator\AppData\Roaming\Rime\lua\wanxiang\ziji\actions\`：
+2. 覆盖到 `<Rime 用户目录>\lua\wanxiang\ziji\actions\`：
    - `actions.dll` ← 本目录那个（89186 B）
    - `actions.lua` ← 本目录那个（62091 B）
    - 想让 26 项快捷键生效，配置里要有一行 `"actions/shortcuts": "@defaults"`
@@ -418,7 +456,7 @@ PE `Time/Date` 显示 1970-01-01）。
 3. 启动服务并**重新部署**（右键 → 重新部署）。
 
 **接线必须改（v4 起）**：`actions.lua` 现在是 processor，必须挂在 `engine/processors`。
-`C:\Users\Administrator\AppData\Roaming\Rime\renwei_wx_zidingyi.yaml` 里那行要改成**放最前**：
+`<Rime 用户目录>\<你的方案>.yaml` 里那行要改成**放最前**：
 
 ```yaml
 engine/processors/@before 0: lua_processor@*wanxiang.ziji.actions.revert
@@ -456,11 +494,11 @@ engine/processors/@after 15: lua_processor@*wanxiang.ziji.actions.revert
 
 ## 8. 调参（默认在 `actions.lua`，可用方案配置覆盖，不用重编）
 
-| 配置项 | `actions.lua` 默认（`actions.lua:63` 的 `DEFAULTS`） | 作用 |
+| 配置项 | `actions.lua` 默认（`actions.lua:51` 的 `DEFAULTS`） | 作用 |
 | --- | --- | --- |
 | `actions/trigger` | `"qq/"` | 方式一的触发码，换 `aa/`、`q/` 就改这里 |
 | `actions/hotkey` | `""`（不启用） | 方式二的组合键，如 `"Control+slash"`；填了它**不挤掉**别的触发方式，四种可以同时用 |
-| `actions/shortcuts` | `""`（全不启用） | 方式三的快捷键表（`"z;=ctrl+z  ss;=shift+home"`，空格分隔、`触发码=动作`，多步用 `,` 或 `-`）；写 `"@defaults"` 展开 `actions.lua:127` 里那 26 项默认；`@to-symbol` / `@to-symbol-include` / `@delete` / `@search` / `@ai` / `@ai:<名字>` 是内置动作 |
+| `actions/shortcuts` | `""`（全不启用） | 方式三的快捷键表（`"z;=ctrl+z  ss;=shift+home"`，空格分隔、`触发码=动作`，多步用 `,` 或 `-`）；写 `"@defaults"` 展开 `actions.lua:118` 里那 26 项默认；`@to-symbol` / `@to-symbol-include` / `@delete` / `@search` / `@ai` / `@ai:<名字>` 是内置动作 |
 | `actions/search_url` | `"https://www.baidu.com/s?wd=%s"` | `@search`（`f;`）打开的地址模板，`%s` 换成搜索词（中文自动 percent-encode） |
 | `actions/symbols` | 一串中英标点（`DEFAULTS.symbols`，不含 `-` `_`） | `@to-symbol` 认定哪些字符算"符号"；支持 `\n` `\t` `\\` 转义 |
 | `actions/dll_dir` | `"lua/wanxiang/ziji"` | dll 所在目录（相对 `<Rime 用户目录>`） |
@@ -471,11 +509,13 @@ engine/processors/@after 15: lua_processor@*wanxiang.ziji.actions.revert
 | `actions/ai/enabled` | `false` | 方式四（AI）总开关；关着时 `ai;` 这类触发码不生效（记 `ai shortcut ignored (actions/ai/enabled is false)`） |
 | `actions/ai/send_key` | `"/"` | 发送键：**单字符 = 连按两下**（`/`、`;`、`'` 都行）；带 `+` 如 `"ctrl+enter"` = **按一次即发** |
 | `actions/ai/double_ms` | `1000` | 单字符发送键的双击窗口（毫秒，50~5000）；太短会把手快的两下当两次无关输入 |
+| `actions/ai/clip_key` | `"ctrl+alt+semicolon"` | 复制后按它把剪贴板内容发出去（只在 AI 模式下有效）；写空 / `none` / `off` = 不启用 |
+| `actions/ai/clip_max_chars` | `4000` | 剪贴板最多发多少字，超出按字符截断（1~20000） |
 | `actions/ai/source` | `"auto"` | 发什么：`auto`（有未上屏编码就发编码、没有就发已上屏）/ `composition` / `committed`（写别的值一律当 `auto`） |
 | `actions/ai/sentence_marks` | `"。！？"` | 分隔符：**先把末尾那串符号（`actions/symbols` 认定的，含连续多个）和空白跳过**，再从后往前找最后一个分隔符、只发它后面那句；支持 `\n` `\t` `\\` 转义 |
 | `actions/ai/include_marks` | `false` | 要不要把末尾跳过的那串符号补回去一起发（默认 false=只发句子本身） |
-| `actions/ai/replace` | `false` | 结果回来后先删掉原文再打字。删的是"上一组符号之后到光标"这一整段（句子 + 末尾那串符号，长度由 `ai_last_sentence()` 的第二个返回值 `cut` 给出）；这一段里含 `\n` 就不删 |
-| `actions/ai/history_chars` | `200` | 跟在后面的"上文"最多多少字（0~5000），取自本组件的上屏记账，跳过 AI 自己写进去的 |
+| `actions/ai/replace` | `false` | 结果回来后先删掉原文再打字。删的范围和取文一致：从光标往回删到上一个 `actions/ai/sentence_marks` 符号为止（符号之后的内容连末尾那串符号一起删，跨多次上屏也算）；这段里含 `\n` 就不删 |
+| `actions/ai/history_chars` | `200` | 上下文总量上限（0~5000）：之前答过的问答按对带上 + 本笔断句点之前的文字；跳过 AI 自己写进去的，没答过的旧上屏不算 |
 | `actions/ai/provider` | `"online"` | 用哪一组接口配置：`online` / `local` |
 | `actions/ai/online/base_url` | DeepSeek | OpenAI 格式的接口根地址，请求会打 `base_url` 本身 |
 | `actions/ai/online/model` | `"deepseek-chat"` | 模型名 |
@@ -489,9 +529,9 @@ engine/processors/@after 15: lua_processor@*wanxiang.ziji.actions.revert
 | `actions/ai/nudge_key` | `135` | 叫醒用哪个键（1~255）；`135` = `0x87` = F24（键盘上没有、输入法没绑、程序不响应） |
 | `actions/ai/nudge_interval` | `350` | 多久敲一次（毫秒，50~60000） |
 | `actions/ai/max_wait_s` | `60` | 一个请求最多等多久（秒，1~600），超时就取消 |
-| `actions.c:35` | `MAX_BACKSPACES 10000` | dll 侧防呆上限（要超过 10000 才需重编） |
+| `actions.c:74` | `MAX_BACKSPACES 10000` | dll 侧防呆上限（要超过 10000 才需重编） |
 
-异步注入的固定参数（编在 dll 里，改要重编）：`actions.c:38-42` 的 `FIRE_DELAY_MS 80`、
+异步注入的固定参数（编在 dll 里，改要重编）：`actions.c:77-81` 的 `FIRE_DELAY_MS 80`、
 `BATCH_SIZE 8`、`BATCH_GAP_MS 5`、`MIN_INTERVAL_MS 150`、`WORKER_POLL_MS 5`。
 
 | 固定参数 | 值 | 作用 |
@@ -500,10 +540,10 @@ engine/processors/@after 15: lua_processor@*wanxiang.ziji.actions.revert
 | `BATCH_SIZE` | 8 | 每次 `SendInput` 发几个退格 |
 | `BATCH_GAP_MS` | 5 ms | 批与批之间歇多久 |
 | `MIN_INTERVAL_MS` | 150 ms | 距上次注入不足这个时间的请求直接丢弃（返回 0）；`press_backspace` 和 `press_keys` 共用这一个窗口 |
-| `STEP_GAP_MS` | 30 ms | `press_keys` **默认**的按键间隔：相邻两个按键事件之间、以及多步之间等多久（`actions.c:78`；实际值由 `actions/key_gap_ms` 传入） |
+| `STEP_GAP_MS` | 30 ms | `press_keys` **默认**的按键间隔：相邻两个按键事件之间、以及多步之间等多久（`actions.c:83`；实际值由 `actions/key_gap_ms` 传入） |
 | `MAX_KEY_GAP_MS` | 500 | `press_keys` 第二参数的防呆上限（`:79`） |
-| `MAX_CHORD_EVENTS` | 12 | 一步里最多几个键事件（`actions.c:68`） |
-| `MAX_SPEC_LEN` | 255 | `press_keys` 接受的 spec 字符串上限（`actions.c:67`） |
+| `MAX_CHORD_EVENTS` | 12 | 一步里最多几个键事件（`actions.c:87`） |
+| `MAX_SPEC_LEN` | 255 | `press_keys` 接受的 spec 字符串上限（`actions.c:86`） |
 | `MAX_URL_LEN` | 2048 | `open_url` 接受的 URL 上限（v8） |
 
 覆盖示例（`xxx.custom.yaml`）：
@@ -528,22 +568,22 @@ patch:
   "actions/shortcuts": "@defaults ai;=@ai eng;=@ai:eng jp;=@ai:jp"  # 加三个进 AI 的触发码
 ```
 
-读取与回落逻辑在 `actions.lua:1307` 的 `init(env)`（AI 那组在 `actions.lua:1204` 的 `init_ai(env, config)`；
-整数/小数读用 `cfg_int` / `cfg_number`（`actions.lua:228`），布尔用 `cfg_bool`（`actions.lua:212`）；
-组合键解析在 `actions.lua:1307` 之后，文本触发码的前缀/末键同理，`actions/search_url` 在同段，
-快捷键表由 `actions.lua:379` 的 `parse_shortcuts()` 处理，`@defaults` 展开
-`actions.lua:127` 的 `DEFAULT_SHORTCUTS`）：
-配置为空/非法就用 `DEFAULTS`（`actions.lua:63`），负数与超大值夹到 `LIMITS`（`actions.lua:107`），
-最终生效值打进 `actions.lua:1307` 之后那行日志（`mode=` / `trigger=` / `hotkey=` / `shortcuts=` /
+读取与回落逻辑在 `actions.lua:1750` 的 `init(env)`（AI 那组在 `actions.lua:1625` 的 `init_ai(env, config)`；
+整数/小数读用 `cfg_int` / `cfg_number`（`actions.lua:197`），布尔用 `cfg_bool`（`actions.lua:207`）；
+组合键解析在 `actions.lua:1750` 之后，文本触发码的前缀/末键同理，`actions/search_url` 在同段，
+快捷键表由 `actions.lua:376` 的 `parse_shortcuts()` 处理，`@defaults` 展开
+`actions.lua:118` 的 `DEFAULT_SHORTCUTS`）：
+配置为空/非法就用 `DEFAULTS`（`actions.lua:51`），负数与超大值夹到 `LIMITS`（`actions.lua:97`），
+最终生效值打进 `actions.lua:1750` 之后那行日志（`mode=` / `trigger=` / `hotkey=` / `shortcuts=` /
 `search_url=` / `key_gap_ms=` / `ai=`）。
-触发处理在 `actions.lua:1403` 的 `func(key, env)`：先判 `key:release()`，AI 开着时先交给
+触发处理在 `actions.lua:1846` 的 `func(key, env)`：先判 `key:release()`，AI 开着时先交给
 `ai_handle_key()`（AI 模式下其余按键一律 `kNoop`），然后依次是
 组合键分支 → **快捷键分支**（要求 `key` 不带修饰键、`context.input == action.prefix`、
 `key.keycode == action.code`，命中就 `context:clear()` 后按动作类型分发）→ 主文本触发码分支
-（前缀 + 末键 + `debounce`）。四种方式互不排斥。删字走 `actions.lua:572` 的 `fire_delete(env)`
-与 `actions.lua:597` 的 `fire_to_symbol(env, include)`，发键走 `actions.lua:650` 的 `fire_keys(env, action)`，
-搜索走 `actions.lua:689` 的 `fire_search(env)`，AI 发送/取回走 `actions.lua:946` / `actions.lua:1046`；
-C 侧返回 0（被忽略）时由 `actions.lua:507` 的 `push_back()` 把那条记录放回栈尾。
+（前缀 + 末键 + `debounce`）。四种方式互不排斥。删字走 `actions.lua:610` 的 `fire_delete(env)`
+与 `actions.lua:626` 的 `fire_to_symbol(env, include)`，发键走 `actions.lua:669` 的 `fire_keys(env, action)`，
+搜索走 `actions.lua:708` 的 `fire_search(env)`，AI 发送/取回走 `actions.lua:1109` / `actions.lua:1367`；
+C 侧返回 0（被忽略）时由 `actions.lua:530` 的 `push_back()` 把那条记录放回栈尾。
 
 触发码规则（**方式一和方式三的触发码都要**）：**每个字符都必须在 `speller/alphabet` 里**。`/` 与 `;`
 都在 `wanxiang_pro.schema.yaml:276` 的 alphabet 末尾（`` ` `` `;` `/` `\`），所以 `qq/`、`aa/`、`z;`

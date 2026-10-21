@@ -731,6 +731,8 @@ revert.fini(envH8b)
 -- =====================================================================
 local requests, sends, nudges = {}, {}, {}
 local req_seq, req_state, result_body, result_err, cancels = 0, "idle", "", nil, 0
+local clip_text, clip_err = nil, nil
+local clip_pending, clip_requests = false, 0
 
 mod.http_request = function(url, body, headers)
   requests[#requests + 1] = { url = url, body = body, headers = headers }
@@ -750,6 +752,25 @@ mod.http_result = function()
 end
 mod.http_cancel = function() cancels = cancels + 1; req_state = "idle"; return 1 end
 mod.send_text = function(text) sends[#sends + 1] = text; return 1 end
+mod.clipboard_get = function()
+  if clip_err then local e = clip_err; clip_err = nil; return nil, e end
+  if clip_text == nil then return nil, "剪贴板里没有文本" end
+  return clip_text, nil
+end
+-- 异步版：request 排队，tick 用 take 取结果（按键回调里不再同步读剪贴板）
+mod.clipboard_request = function()
+  if clip_pending then return 2 end
+  clip_pending = true
+  clip_requests = clip_requests + 1
+  return 1
+end
+mod.clipboard_take = function()
+  if not clip_pending then return nil, nil end
+  clip_pending = false
+  if clip_err then local e = clip_err; clip_err = nil; return nil, e end
+  if clip_text == nil then return nil, "剪贴板里没有文本" end
+  return clip_text, nil
+end
 mod.nudge = function(delay, vk)
   nudges[#nudges + 1] = tostring(delay) .. "/" .. tostring(vk)
   return 1
@@ -945,7 +966,7 @@ rec("I8_combo", tostring(envI8.ai_send and envI8.ai_send.combo ~= nil))
 type_text(revert, envI8, ctxI8, "ai;")
 commit(ctxI8, "\u{6c49}\u{5b57}")
 requests = {}
-rec("I8_ret", tostring(feed(revert, envI8, ctxI8, key(0x0D, { ctrl = true }))))
+rec("I8_ret", tostring(feed(revert, envI8, ctxI8, key(0xFF0D, { ctrl = true }))))
 rec("I8_reqs", tostring(#requests))
 revert.fini(envI8)
 
@@ -980,13 +1001,413 @@ revert.fini(envI10)
 logs = {}
 type_text(revert, envI, ctxI, "eng;")
 rec("I11_mode", tostring(envI.ai_mode and envI.ai_mode.prompt))
-commit(ctxI, "abc")
+commit(ctxI, "\u{4f60}\u{597d}\u{4e16}\u{754c}\u{3002}")
 requests = {}
 envI.ai_last_push = os.clock()
 feed(revert, envI, ctxI, key(0x2F))
 rec("I11_system",
     requests[1] and (requests[1].body:match('"role":"system","content":"([^"]*)"') or "-") or "-")
+rec("I11_user",
+    requests[1] and (function() local last = "-"
+      for u in requests[1].body:gmatch('"role":"user","content":"([^"]*)"') do last = u end
+      return last end)() or "-")
 rec("I11_log_prompt", tostring(last_log():match("prompt=(%w+)")))
+
+-- I18: 之前的问答按对话轮次带上；没答过的旧文字不进上文
+local function roles_of(body)
+  local out = {}
+  for r in body:gmatch('"role":"(%a+)"') do out[#out + 1] = r end
+  return table.concat(out, ",")
+end
+
+local function last_user(body)
+  local last = "-"
+  for u in body:gmatch('"role":"user","content":"([^"]*)"') do last = u end
+  return last
+end
+
+local cfgI18 = cfg_plain({
+  ["actions/trigger"]            = "qq/",
+  ["actions/shortcuts"]          = "ai;=@ai",
+  ["actions/dll_dir"]            = DLLREL,
+  ["actions/debounce_ms"]        = 0,
+  ["actions/ai/enabled"]         = true,
+  ["actions/ai/online/base_url"] = "https://example.test/v1/chat/completions",
+  ["actions/ai/online/model"]    = "test-model",
+  ["actions/ai/online/api_key"]  = "sk-test",
+})
+local envI18, ctxI18 = new_env(cfgI18)
+revert.init(envI18)
+type_text(revert, envI18, ctxI18, "ai;")
+
+commit(ctxI18, "\u{9e66}\u{9e49}\u{6700}\u{7231}\u{5403}\u{4ec0}\u{4e48}\u{ff1f}")
+requests, sends = {}, {}
+envI18.ai_last_push = os.clock()
+feed(revert, envI18, ctxI18, key(0x2F))
+req_state = "done"
+result_body = '{"choices":[{"message":{"content":"A1"}}]}'
+injected = {}
+feed(revert, envI18, ctxI18, key(0x87))
+envI18.ai_typing_until = nil
+
+commit(ctxI18, "\u{591a}\u{5c11}\u{79cd}\u{7f57}\u{975e}\u{9c7c}\u{ff1f}")
+requests = {}
+envI18.ai_last_push = os.clock()
+feed(revert, envI18, ctxI18, key(0x2F))
+rec("I18_roles", requests[1] and roles_of(requests[1].body) or "-")
+rec("I18_system", requests[1] and (requests[1].body:match('"role":"system","content":"([^"]*)"') or "-") or "-")
+rec("I18_pair_q", requests[1] and (requests[1].body:match('"role":"user","content":"([^"]*)"') or "-") or "-")
+rec("I18_pair_a", requests[1] and (requests[1].body:match('"role":"assistant","content":"([^"]*)"') or "-") or "-")
+rec("I18_last_user", requests[1] and last_user(requests[1].body) or "-")
+
+-- 收掉这一问，账本里就有一对问答
+req_state = "done"
+result_body = '{"choices":[{"message":{"content":"A2"}}]}'
+injected = {}
+feed(revert, envI18, ctxI18, key(0x87))
+envI18.ai_typing_until = nil
+
+-- I18b: 上一笔没被回答（只是打了一句） -> 不进上文
+requests = {}
+commit(ctxI18, "\u{5b64}\u{96f6}\u{96f6}\u{7684}\u{4e00}\u{53e5}\u{3002}")
+commit(ctxI18, "\u{7b2c}\u{4e8c}\u{53e5}\u{8981}\u{53d1}\u{7684}\u{3002}")
+envI18.ai_last_push = os.clock()
+feed(revert, envI18, ctxI18, key(0x2F))
+rec("I18b_roles", requests[1] and roles_of(requests[1].body) or "-")
+rec("I18b_user", requests[1] and last_user(requests[1].body) or "-")
+rec("I18b_hist", tostring(requests[1] ~= nil
+  and requests[1].body:find("\u{3010}\u{4e0a}\u{6587}\u{3011}\u{5b64}\u{96f6}\u{96f6}\u{7684}\u{4e00}\u{53e5}\u{3002}", 1, true) ~= nil))
+revert.fini(envI18)
+
+-- I19: 分多次上屏时，往前拼到一起，直到碰到断句符
+local cfgI19 = cfg_plain({
+  ["actions/trigger"]            = "qq/",
+  ["actions/shortcuts"]          = "ai;=@ai",
+  ["actions/dll_dir"]            = DLLREL,
+  ["actions/debounce_ms"]        = 0,
+  ["actions/ai/enabled"]         = true,
+  ["actions/ai/online/base_url"] = "https://example.test/v1/chat/completions",
+  ["actions/ai/online/model"]    = "test-model",
+  ["actions/ai/online/api_key"]  = "sk-test",
+})
+local envI19, ctxI19 = new_env(cfgI19)
+revert.init(envI19)
+type_text(revert, envI19, ctxI19, "ai;")
+
+-- 一句话分两次上屏
+commit(ctxI19, "\u{6700}\u{597d}\u{5403}\u{7684}\u{5927}\u{7c73}\u{662f}")
+commit(ctxI19, "\u{54ea}\u{79cd}\u{ff1f}")
+requests = {}
+envI19.ai_last_push = os.clock()
+feed(revert, envI19, ctxI19, key(0x2F))
+rec("I19_split_user", requests[1] and last_user(requests[1].body) or "-")
+
+-- 上一笔已经带句号：只取句号后面的
+req_state = "done"
+result_body = '{"choices":[{"message":{"content":"A1"}}]}'
+injected = {}
+feed(revert, envI19, ctxI19, key(0x87))
+envI19.ai_typing_until = nil
+commit(ctxI19, "\u{4eca}\u{5929}\u{5929}\u{6c14}\u{5f88}\u{597d}\u{3002}")
+commit(ctxI19, "\u{6211}\u{51fa}\u{95e8}\u{4e86}")
+requests = {}
+envI19.ai_last_push = os.clock()
+feed(revert, envI19, ctxI19, key(0x2F))
+rec("I19_after_mark", requests[1] and last_user(requests[1].body) or "-")
+
+-- 三笔连写，中间没有断句符：合成一句发
+req_state = "done"
+result_body = '{"choices":[{"message":{"content":"A2"}}]}'
+injected = {}
+feed(revert, envI19, ctxI19, key(0x87))
+envI19.ai_typing_until = nil
+commit(ctxI19, "\u{7b2c}\u{4e00}\u{53e5}\u{3002}\u{7b2c}\u{4e8c}\u{53e5}")
+commit(ctxI19, "\u{7b2c}\u{4e09}\u{53e5}")
+requests = {}
+envI19.ai_last_push = os.clock()
+feed(revert, envI19, ctxI19, key(0x2F))
+rec("I19_three", requests[1] and last_user(requests[1].body) or "-")
+revert.fini(envI19)
+
+-- I20: replace 且多次上屏、中间没有断句符 -> 这两次上屏一起删
+local cfgI20 = cfg_plain({
+  ["actions/trigger"]            = "qq/",
+  ["actions/shortcuts"]          = "ai;=@ai",
+  ["actions/dll_dir"]            = DLLREL,
+  ["actions/debounce_ms"]        = 0,
+  ["actions/ai/enabled"]         = true,
+  ["actions/ai/replace"]         = true,
+  ["actions/ai/online/base_url"] = "https://example.test/v1/chat/completions",
+  ["actions/ai/online/model"]    = "test-model",
+  ["actions/ai/online/api_key"]  = "sk-test",
+})
+logs = {}
+local envI20, ctxI20 = new_env(cfgI20)
+revert.init(envI20)
+type_text(revert, envI20, ctxI20, "ai;")
+commit(ctxI20, "\u{7b2c}\u{4e00}\u{6bb5}\u{6ca1}\u{6709}\u{53e5}\u{53f7}")
+commit(ctxI20, "\u{7b2c}\u{4e8c}\u{6bb5}")
+requests = {}
+envI20.ai_last_push = os.clock()
+feed(revert, envI20, ctxI20, key(0x2F))
+req_state = "done"
+result_body = '{"choices":[{"message":{"content":"XYZ"}}]}'
+injected = {}
+sends = {}
+feed(revert, envI20, ctxI20, key(0x87))
+rec("I20_injected", table.concat(injected, ","))
+rec("I20_send_text", table.concat(sends, "|"))
+rec("I20_log_skip", tostring(log_has("replace skipped")))
+revert.fini(envI20)
+
+-- I20b: replace 且多次上屏、断句符在前面那次上屏里 -> 只删断句符之后那段
+logs = {}
+local envI20b, ctxI20b = new_env(cfgI20)
+revert.init(envI20b)
+type_text(revert, envI20b, ctxI20b, "ai;")
+commit(ctxI20b, "\u{4eca}\u{5929}\u{5929}\u{6c14}\u{5f88}\u{597d}\u{3002}")
+commit(ctxI20b, "\u{6211}\u{51fa}\u{95e8}\u{4e86}")
+requests = {}
+sends = {}
+injected = {}
+envI20b.ai_last_push = os.clock()
+feed(revert, envI20b, ctxI20b, key(0x2F))
+req_state = "done"
+result_body = '{"choices":[{"message":{"content":"XYZ"}}]}'
+feed(revert, envI20b, ctxI20b, key(0x87))
+rec("I20b_reqs", tostring(#requests))
+rec("I20b_user", requests[1] and last_user(requests[1].body) or "-")
+rec("I20b_injected", table.concat(injected, ","))
+rec("I20b_send_text", table.concat(sends, "|"))
+revert.fini(envI20b)
+
+-- I21: 正文先上屏、末尾的问号单独上屏 -> 整句照删（问号那条不算"正文"）
+logs = {}
+local envI21, ctxI21 = new_env(cfgI20)
+revert.init(envI21)
+type_text(revert, envI21, ctxI21, "ai;")
+commit(ctxI21, "\u{798f}\u{5efa}\u{7684}\u{7f8e}\u{98df}\u{6709}\u{54ea}\u{4e9b}")
+commit(ctxI21, "\u{ff1f}")
+requests = {}
+sends = {}
+injected = {}
+envI21.ai_last_push = os.clock()
+feed(revert, envI21, ctxI21, key(0x2F))
+req_state = "done"
+result_body = '{"choices":[{"message":{"content":"XYZ"}}]}'
+feed(revert, envI21, ctxI21, key(0x87))
+rec("I21_reqs", tostring(#requests))
+rec("I21_user", requests[1] and last_user(requests[1].body) or "-")
+rec("I21_injected", table.concat(injected, ","))
+rec("I21_send_text", table.concat(sends, "|"))
+rec("I21_log_skip", tostring(log_has("replace skipped")))
+revert.fini(envI21)
+
+-- I22: 答案打完之后，用户再打的"同名"单字不能被当成 AI 自己的输出
+-- （否则取文和删除范围都会少一个字，表现是原句只剩第一个字）
+logs = {}
+local envI22, ctxI22 = new_env(cfgI20)
+revert.init(envI22)
+type_text(revert, envI22, ctxI22, "ai;")
+envI22.ai_last_text = "\u{622a}\u{81f3}2023\u{5e74}\u{ff0c}\u{4e2d}\u{56fd}\u{5171}\u{6709}\u{5730}\u{7ea7}\u{5e02}333\u{4e2a}"
+envI22.ai_text_pos = #envI22.ai_last_text + 1
+envI22.ai_typing_until = os.clock() + 100
+commit(ctxI22, "\u{4e2d}")
+commit(ctxI22, "\u{56fd}\u{6709}\u{591a}\u{5c11}\u{4e2a}\u{5e02}")
+commit(ctxI22, "\u{ff1f}")
+envI22.ai_typing_until = nil
+requests = {}
+sends = {}
+injected = {}
+envI22.ai_last_push = os.clock()
+feed(revert, envI22, ctxI22, key(0x2F))
+req_state = "done"
+result_body = '{"choices":[{"message":{"content":"XYZ"}}]}'
+feed(revert, envI22, ctxI22, key(0x87))
+rec("I22_reqs", tostring(#requests))
+rec("I22_user", requests[1] and last_user(requests[1].body) or "-")
+rec("I22_injected", table.concat(injected, ","))
+revert.fini(envI22)
+
+-- I23: 发送前按过回车（光标到了下一行）-> 删除长度要算上那个换行
+logs = {}
+local envI23, ctxI23 = new_env(cfgI20)
+revert.init(envI23)
+type_text(revert, envI23, ctxI23, "ai;")
+commit(ctxI23, "\u{4e2d}\u{56fd}\u{6709}\u{591a}\u{5c11}\u{4e2a}\u{5e02}\u{ff1f}")
+feed(revert, envI23, ctxI23, key(0xFF0D))
+requests = {}
+sends = {}
+injected = {}
+envI23.ai_last_push = os.clock()
+feed(revert, envI23, ctxI23, key(0x2F))
+req_state = "done"
+result_body = '{"choices":[{"message":{"content":"XYZ"}}]}'
+feed(revert, envI23, ctxI23, key(0x87))
+rec("I23_reqs", tostring(#requests))
+rec("I23_user", requests[1] and last_user(requests[1].body) or "-")
+rec("I23_injected", table.concat(injected, ","))
+revert.fini(envI23)
+
+-- I24: 连按两个回车（真实 keysym 0xFF0D / 0xFF8D）-> 两个换行都并进删除长度
+logs = {}
+local envI24, ctxI24 = new_env(cfgI20)
+revert.init(envI24)
+type_text(revert, envI24, ctxI24, "ai;")
+commit(ctxI24, "\u{7b2c}\u{4e00}\u{53e5}\u{3002}")     -- 第一句。
+commit(ctxI24, "\u{7b2c}\u{4e8c}\u{53e5}")            -- 第二句
+feed(revert, envI24, ctxI24, key(0xFF0D))
+feed(revert, envI24, ctxI24, key(0xFF8D))
+requests = {}
+sends = {}
+injected = {}
+envI24.ai_last_push = os.clock()
+feed(revert, envI24, ctxI24, key(0x2F))
+req_state = "done"
+result_body = '{"choices":[{"message":{"content":"XYZ"}}]}'
+feed(revert, envI24, ctxI24, key(0x87))
+rec("I24_reqs", tostring(#requests))
+rec("I24_user", requests[1] and last_user(requests[1].body) or "-")
+rec("I24_injected", table.concat(injected, ","))
+revert.fini(envI24)
+
+-- I25: actions/hotkey 里写非打印键名（Control+return）-> 按键码是 keysym 0xFF0D
+logs = {}
+local envI25, ctxI25 = new_env(cfg_plain({
+  ["actions/hotkey"]  = "Control+return",
+  ["actions/trigger"] = "qq/",
+  ["actions/dll_dir"] = DLLREL,
+  ["actions/debounce_ms"] = 0,
+}))
+revert.init(envI25)
+commit(ctxI25, "abc")
+injected = {}
+ctxI25.input = ""
+rec("I25_ret", tostring(feed(revert, envI25, ctxI25, key(0xFF0D, { ctrl = true }))))
+rec("I25_injected", table.concat(injected, ","))
+revert.fini(envI25)
+
+-- I26: 唤醒键用真实键码（F24 = keysym 0xFFD5，配置值仍是 VK 0x87）
+logs = {}
+local envI26, ctxI26 = new_env(cfgI20)
+revert.init(envI26)
+type_text(revert, envI26, ctxI26, "ai;")
+commit(ctxI26, "\u{4e2d}\u{56fd}\u{6709}\u{591a}\u{5c11}\u{4e2a}\u{5e02}")
+requests, sends, nudges, injected = {}, {}, {}, {}
+envI26.ai_last_push = os.clock()
+feed(revert, envI26, ctxI26, key(0x2F))
+rec("I26_reqs", tostring(#requests))
+rec("I26_nudge_first", table.concat(nudges, ","))
+-- 结果回来时敲的是 F24 的 keysym（以前按 0x87 比，永远不相等 -> 唤醒链断掉）
+req_state = "done"
+result_body = '{"choices":[{"message":{"content":"XYZ"}}]}'
+rec("I26_tick_ret", tostring(feed(revert, envI26, ctxI26, key(0xFFD5))))
+rec("I26_send_text", table.concat(sends, ","))
+revert.fini(envI26)
+
+-- I26b: 唤醒键还在等（running）-> 排下一轮唤醒，别让链子断
+logs = {}
+local envI26b, ctxI26b = new_env(cfgI20)
+revert.init(envI26b)
+type_text(revert, envI26b, ctxI26b, "ai;")
+commit(ctxI26b, "\u{4e2d}\u{56fd}")
+requests, sends, nudges, injected = {}, {}, {}, {}
+envI26b.ai_last_push = os.clock()
+feed(revert, envI26b, ctxI26b, key(0x2F))
+nudges = {}
+envI26b.ai_nudged = os.clock() - 1
+req_state = "running"
+feed(revert, envI26b, ctxI26b, key(0xFFD5))
+rec("I26b_reqs", tostring(#requests))
+rec("I26b_nudge_again", table.concat(nudges, ","))
+revert.fini(envI26b)
+
+-- I27: 第一笔只有一个字（"中"），后一笔是其余部分 -> 取文和回删都要算全 8 个字
+local cfgI27 = cfg_plain({
+  ["actions/trigger"]            = "qq/",
+  ["actions/shortcuts"]          = "ai;=@ai",
+  ["actions/dll_dir"]            = DLLREL,
+  ["actions/debounce_ms"]        = 0,
+  ["actions/ai/enabled"]         = true,
+  ["actions/ai/replace"]         = true,
+  ["actions/ai/online/base_url"] = "https://example.test/v1/chat/completions",
+  ["actions/ai/online/model"]    = "test-model",
+  ["actions/ai/online/api_key"]  = "sk-test",
+})
+logs = {}
+local envI27, ctxI27 = new_env(cfgI27)
+revert.init(envI27)
+type_text(revert, envI27, ctxI27, "ai;")
+commit(ctxI27, "\u{4e2d}")
+commit(ctxI27, "\u{56fd}\u{6709}\u{591a}\u{5c11}\u{4e2a}\u{5e02}\u{ff1f}")
+requests, sends, injected = {}, {}, {}
+envI27.ai_last_push = os.clock()
+feed(revert, envI27, ctxI27, key(0x2F))
+rec("I27_reqs", tostring(#requests))
+rec("I27_user", requests[1] and last_user(requests[1].body) or "-")
+req_state = "done"
+result_body = '{"choices":[{"message":{"content":"XYZ"}}]}'
+feed(revert, envI27, ctxI27, key(0xFFD5))
+rec("I27_injected", table.concat(injected, ","))
+revert.fini(envI27)
+
+-- I27b: 问号单独一笔上屏 -> 删除长度也要把它算进去（8 个字）
+logs = {}
+local envI27b, ctxI27b = new_env(cfgI27)
+revert.init(envI27b)
+type_text(revert, envI27b, ctxI27b, "ai;")
+commit(ctxI27b, "\u{4e2d}\u{56fd}\u{6709}\u{591a}\u{5c11}\u{4e2a}\u{5e02}")
+commit(ctxI27b, "\u{ff1f}")
+requests, sends, injected = {}, {}, {}
+envI27b.ai_last_push = os.clock()
+feed(revert, envI27b, ctxI27b, key(0x2F))
+rec("I27b_reqs", tostring(#requests))
+rec("I27b_user", requests[1] and last_user(requests[1].body) or "-")
+req_state = "done"
+result_body = '{"choices":[{"message":{"content":"XYZ"}}]}'
+feed(revert, envI27b, ctxI27b, key(0xFFD5))
+rec("I27b_injected", table.concat(injected, ","))
+revert.fini(envI27b)
+
+-- I28: 第一下 / 进了编码（编码里只有这一个字符）-> 第二下要把它摘掉，再发
+logs = {}
+local envI28, ctxI28 = new_env(cfgI27)
+revert.init(envI28)
+type_text(revert, envI28, ctxI28, "ai;")
+commit(ctxI28, "\u{4e2d}\u{56fd}\u{6709}\u{591a}\u{5c11}\u{4e2a}\u{5e02}\u{ff1f}")
+requests, sends, injected = {}, {}, {}
+ctxI28.popped = 0
+ctxI28.input = "/"
+envI28.ai_last_push = os.clock()
+feed(revert, envI28, ctxI28, key(0x2F))
+rec("I28_reqs", tostring(#requests))
+rec("I28_popped", tostring(ctxI28.popped))
+rec("I28_input", ctxI28.input)
+req_state = "done"
+result_body = '{"choices":[{"message":{"content":"XYZ"}}]}'
+feed(revert, envI28, ctxI28, key(0xFFD5))
+rec("I28_injected", table.concat(injected, ","))
+revert.fini(envI28)
+
+-- I29: 结果回来时输入框里还压着编码 -> 先清掉，退格才全部落在正文上（删 8 个字）
+logs = {}
+local envI29, ctxI29 = new_env(cfgI27)
+revert.init(envI29)
+type_text(revert, envI29, ctxI29, "ai;")
+commit(ctxI29, "\u{4e2d}\u{56fd}\u{6709}\u{591a}\u{5c11}\u{4e2a}\u{5e02}\u{ff1f}")
+requests, sends, injected = {}, {}, {}
+envI29.ai_last_push = os.clock()
+feed(revert, envI29, ctxI29, key(0x2F))
+rec("I29_reqs", tostring(#requests))
+ctxI29.input = "/"
+ctxI29.cleared = 0
+req_state = "done"
+result_body = '{"choices":[{"message":{"content":"XYZ"}}]}'
+feed(revert, envI29, ctxI29, key(0xFFD5))
+rec("I29_cleared", tostring(ctxI29.cleared))
+rec("I29_input", ctxI29.input)
+rec("I29_injected", table.concat(injected, ","))
+revert.fini(envI29)
 
 -- I12: 没有任何可发的内容 -> 只记日志
 logs = {}
@@ -1140,7 +1561,236 @@ feed(revert, envI16, ctxI16, key(0x2F))
 rec("I16_reqs_one", tostring(#requests))
 feed(revert, envI16, ctxI16, key(0x2F))
 rec("I16_reqs_two", tostring(#requests))
+rec("I16_log_nothing", tostring(log_has("nothing to send")))
+-- 再上屏一句新的，按两下就应该发出去
+commit(ctxI16, "\u{65b0}\u{7684}\u{95ee}\u{9898}\u{ff1f}")
+feed(revert, envI16, ctxI16, key(0x2F))
+feed(revert, envI16, ctxI16, key(0x2F))
+rec("I16_reqs_three", tostring(#requests))
 revert.fini(envI16)
+
+-- I17: 读剪贴板发送（Ctrl+Alt+;）—— 用户自己 Ctrl+C，脚本只负责读出来发
+logs = {}
+local cfgI17 = cfg_plain({
+  ["actions/shortcuts"]      = "ai;=@ai",
+  ["actions/dll_dir"]        = DLLREL,
+  ["actions/debounce_ms"]    = 0,
+  ["actions/ai/enabled"]     = true,
+  ["actions/ai/online/api_key"] = "sk-test",
+})
+local envI17, ctxI17 = new_env(cfgI17)
+revert.init(envI17)
+type_text(revert, envI17, ctxI17, "ai;")
+rec("I17_mode", tostring(envI17.ai_mode and envI17.ai_mode.prompt))
+rec("I17_log_clip", tostring(log_has("clip_key=ctrl+alt+semicolon")))
+
+local function clipkey() return key(0x3B, { ctrl = true, alt = true, modifier = 6 }) end
+
+clip_text = "你好，世界"
+clip_pending = false
+local before_reqs = #requests
+rec("I17_ret", tostring(feed(revert, envI17, ctxI17, clipkey())))
+rec("I17_pending", tostring(envI17.ai_clip_started ~= nil))
+rec("I17_reqs_before_tick", tostring(#requests - before_reqs))
+feed(revert, envI17, ctxI17, key(0x87))   -- 唤醒键回来取剪贴板内容
+rec("I17_reqs", tostring(#requests - before_reqs))
+rec("I17_body_has_clip", tostring(requests[#requests] ~= nil
+      and requests[#requests].body:find("你好，世界", 1, true) ~= nil))
+rec("I17_prompt", tostring(envI17.ai_req and envI17.ai_req.prompt))
+
+-- 结果照常走唤醒键取回
+req_state = "done"
+result_body = '{"choices":[{"message":{"content":"XYZ"}}]}'
+injected, sends = {}, {}
+envI17.ai_last_push = nil
+feed(revert, envI17, ctxI17, key(0x87))
+rec("I17_send_text", table.concat(sends, "|"))
+envI17.ai_typing_until = nil
+revert.fini(envI17)
+
+-- I17b: 剪贴板里没文本
+logs = {}
+local envI17b, ctxI17b = new_env(cfgI17)
+revert.init(envI17b)
+type_text(revert, envI17b, ctxI17b, "ai;")
+clip_text = nil
+clip_pending = false
+before_reqs = #requests
+feed(revert, envI17b, ctxI17b, clipkey())
+rec("I17b_reqs_before_tick", tostring(#requests - before_reqs))
+feed(revert, envI17b, ctxI17b, key(0x87))
+rec("I17b_reqs_after", tostring(#requests - before_reqs))
+rec("I17b_log_empty", tostring(log_has("clipboard:")))
+revert.fini(envI17b)
+
+-- I17c: 超过 clip_max_chars 只发前面那些字
+logs = {}
+local cfgI17c = cfg_plain({
+  ["actions/shortcuts"]      = "ai;=@ai",
+  ["actions/dll_dir"]        = DLLREL,
+  ["actions/debounce_ms"]    = 0,
+  ["actions/ai/enabled"]     = true,
+  ["actions/ai/online/api_key"] = "sk-test",
+  ["actions/ai/clip_max_chars"] = 4,
+})
+local envI17c, ctxI17c = new_env(cfgI17c)
+revert.init(envI17c)
+type_text(revert, envI17c, ctxI17c, "ai;")
+clip_text = "一二三四五六"
+clip_pending = false
+before_reqs = #requests
+feed(revert, envI17c, ctxI17c, clipkey())
+feed(revert, envI17c, ctxI17c, key(0x87))
+rec("I17c_reqs", tostring(#requests - before_reqs))
+rec("I17c_body_has_4", tostring(requests[#requests] ~= nil
+      and requests[#requests].body:find("一二三四", 1, true) ~= nil))
+rec("I17c_body_has_6", tostring(requests[#requests] ~= nil
+      and requests[#requests].body:find("一二三四五六", 1, true) ~= nil))
+rec("I17c_log_trunc", tostring(log_has("clipboard truncated to 4 chars")))
+revert.fini(envI17c)
+
+-- I17d: clip_key 写空 = 这个功能不启用
+logs = {}
+local cfgI17d = cfg_plain({
+  ["actions/shortcuts"]      = "ai;=@ai",
+  ["actions/dll_dir"]        = DLLREL,
+  ["actions/debounce_ms"]    = 0,
+  ["actions/ai/enabled"]     = true,
+  ["actions/ai/online/api_key"] = "sk-test",
+  ["actions/ai/clip_key"]    = "",
+})
+local envI17d, ctxI17d = new_env(cfgI17d)
+revert.init(envI17d)
+type_text(revert, envI17d, ctxI17d, "ai;")
+clip_text = "不该发出去"
+before_reqs = #requests
+rec("I17d_ret", tostring(feed(revert, envI17d, ctxI17d, clipkey())))
+rec("I17d_reqs", tostring(#requests - before_reqs))
+revert.fini(envI17d)
+clip_text = nil
+
+-- I30: 分两次上屏的问题，进历史时拼成一句
+do
+logs = {}
+local cfg = cfg_plain({
+  ["actions/shortcuts"]      = "ai;=@ai",
+  ["actions/dll_dir"]        = DLLREL,
+  ["actions/debounce_ms"]    = 0,
+  ["actions/ai/enabled"]     = true,
+  ["actions/ai/online/api_key"] = "sk-test",
+})
+local env, ctx = new_env(cfg)
+revert.init(env)
+type_text(revert, env, ctx, "ai;")
+commit(ctx, "\u{9e66}\u{9e49}\u{6700}\u{7231}\u{5403}")
+commit(ctx, "\u{4ec0}\u{4e48}\u{ff1f}")
+requests, sends = {}, {}
+env.ai_last_push = os.clock()
+feed(revert, env, ctx, key(0x2F))
+req_state = "done"
+result_body = '{"choices":[{"message":{"content":"A1"}}]}'
+injected = {}
+feed(revert, env, ctx, key(0x87))
+env.ai_typing_until = nil
+
+commit(ctx, "\u{591a}\u{5c11}\u{79cd}\u{7f57}\u{975e}\u{9c7c}")
+requests = {}
+env.ai_last_push = os.clock()
+feed(revert, env, ctx, key(0x2F))
+rec("I30_pair_q", requests[1] and (requests[1].body:match('"role":"user","content":"([^"]*)"') or "-") or "-")
+rec("I30_last_user", requests[1] and last_user(requests[1].body) or "-")
+revert.fini(env)
+end
+
+-- I31: history_chars 按字算（按字节算的话这段问答会被丢掉）
+do
+logs = {}
+local cfg = cfg_plain({
+  ["actions/shortcuts"]      = "ai;=@ai",
+  ["actions/dll_dir"]        = DLLREL,
+  ["actions/debounce_ms"]    = 0,
+  ["actions/ai/enabled"]     = true,
+  ["actions/ai/online/api_key"] = "sk-test",
+  ["actions/ai/history_chars"] = 6,
+})
+local env, ctx = new_env(cfg)
+revert.init(env)
+type_text(revert, env, ctx, "ai;")
+commit(ctx, "\u{4f60}\u{597d}")
+env.ai_last_push = os.clock()
+feed(revert, env, ctx, key(0x2F))
+req_state = "done"
+result_body = '{"choices":[{"message":{"content":"\u{4e16}\u{754c}"}}]}'
+feed(revert, env, ctx, key(0x87))
+env.ai_typing_until = nil
+commit(ctx, "\u{7b2c}\u{4e09}\u{95ee}")
+requests = {}
+env.ai_last_push = os.clock()
+feed(revert, env, ctx, key(0x2F))
+rec("I31_roles", requests[1] and roles_of(requests[1].body) or "-")
+revert.fini(env)
+end
+
+-- I32: 汉字判定：全角标点不算汉字（不发），扩展 A 区汉字算（发）
+do
+logs = {}
+local cfg = cfg_plain({
+  ["actions/shortcuts"]      = "ai;=@ai",
+  ["actions/dll_dir"]        = DLLREL,
+  ["actions/debounce_ms"]    = 0,
+  ["actions/ai/enabled"]     = true,
+  ["actions/ai/online/api_key"] = "sk-test",
+})
+local env, ctx = new_env(cfg)
+revert.init(env)
+type_text(revert, env, ctx, "ai;")
+commit(ctx, "abc")
+requests = {}
+env.ai_last_push = os.clock()
+feed(revert, env, ctx, key(0x2F))
+rec("I32_reqs", tostring(#requests))
+rec("I32_log_nocjk", tostring(log_has("no 汉字 in the committed text")))
+commit(ctx, "\u{3400}")
+requests = {}
+env.ai_last_push = os.clock()
+feed(revert, env, ctx, key(0x2F))
+rec("I32b_reqs", tostring(#requests))
+revert.fini(env)
+end
+
+-- I33: 按键写法里出现空步（双逗号）就算写坏，不生效
+do
+logs = {}
+local cfg = cfg_plain({
+  ["actions/shortcuts"]      = "z;=ctrl+z,,shift+home",
+  ["actions/dll_dir"]        = DLLREL,
+  ["actions/debounce_ms"]    = 0,
+})
+local env, ctx = new_env(cfg)
+revert.init(env)
+injected = {}
+type_text(revert, env, ctx, "z;")
+rec("I33_log_bad", tostring(log_has("bad key sequence disabled")))
+rec("I33_injected", table.concat(injected, ","))
+revert.fini(env)
+end
+
+-- I34: "@defaults" 必须整词才算（写成 @defaultsx 不启用默认表）
+do
+logs = {}
+local cfg = cfg_plain({
+  ["actions/shortcuts"]      = "@defaultsx",
+  ["actions/dll_dir"]        = DLLREL,
+  ["actions/debounce_ms"]    = 0,
+})
+local env, ctx = new_env(cfg)
+revert.init(env)
+injected = {}
+rec("I34_log_bad", tostring(log_has("bad shortcut entry ignored")))
+type_text(revert, env, ctx, "z;")
+rec("I34_injected", table.concat(injected, ","))
+revert.fini(env)
+end
 
 revert.fini(envI)
 
@@ -1540,10 +2190,65 @@ def main():
         "I10_flag": "false",
         "I10_log": "true",
         "I11_mode": "eng",
-        "I11_system": "CUSTOM-ENG-PROMPT\\n\\n【上文】今天天气很好。",
+        "I11_system": "CUSTOM-ENG-PROMPT",
+        "I11_user": "你好世界",
         "I11_log_prompt": "eng",
+        "I18_roles": "system,user,assistant,user",
+        "I18_system": "你是中文写作助手。把用户给你的文字整理通顺，保持原意和语气，只输出结果正文，不要解释、不要加引号。",
+        "I18_pair_q": "鹦鹉最爱吃什么",
+        "I18_pair_a": "A1",
+        "I18_last_user": "多少种罗非鱼",
+        "I18b_roles": "system,user,assistant,user,assistant,user",
+        "I18b_user": "第二句要发的",
+        "I18b_hist": "true",
+        "I19_split_user": "最好吃的大米是哪种",
+        "I19_after_mark": "我出门了",
+        "I19_three": "第二句第三句",
+        "I20_injected": "10",
+        "I20_send_text": "XYZ",
+        "I20_log_skip": "false",
+        "I20b_reqs": "1",
+        "I20b_user": "我出门了",
+        "I20b_injected": "4",
+        "I20b_send_text": "XYZ",
+        "I21_reqs": "1",
+        "I21_user": "福建的美食有哪些",
+        "I21_injected": "9",
+        "I21_send_text": "XYZ",
+        "I21_log_skip": "false",
         "I12_reqs": "0",
         "I12_log": "true",
+        "I22_reqs": "1",
+        "I22_user": "中国有多少个市",
+        "I22_injected": "8",
+        "I23_reqs": "1",
+        "I23_user": "中国有多少个市",
+        "I23_injected": "9",
+  "I24_reqs": "1",
+  "I24_user": "第二句",
+  "I24_injected": "5",
+  "I25_ret": "1",
+  "I25_injected": "3",
+  "I26_reqs": "1",
+  "I26_nudge_first": "350/135",
+  "I26_tick_ret": "1",
+  "I26_send_text": "XYZ",
+  "I26b_reqs": "1",
+  "I26b_nudge_again": "350/135",
+  "I27_reqs": "1",
+  "I27_user": "中国有多少个市",
+  "I27_injected": "8",
+  "I27b_reqs": "1",
+  "I27b_user": "中国有多少个市",
+  "I27b_injected": "8",
+  "I28_reqs": "1",
+  "I28_popped": "1",
+  "I28_input": "",
+  "I28_injected": "8",
+  "I29_reqs": "1",
+  "I29_cleared": "1",
+  "I29_input": "",
+  "I29_injected": "8",
         "I13_trailing_marks": "我出门了",
         "I13_marks_between": "我回来了",
         "I13_only_marks": "-",
@@ -1565,7 +2270,39 @@ def main():
         "I16_reqs_after_take": "1",
         "I16_send_text": "XYZ",
         "I16_reqs_one": "1",
-        "I16_reqs_two": "2",
+        "I16_reqs_two": "1",
+        "I16_log_nothing": "true",
+        "I16_reqs_three": "2",
+        # I17: 读剪贴板发送
+        "I17_mode": "default",
+        "I17_log_clip": "true",
+        "I17_ret": "1",
+        "I17_pending": "true",
+        "I17_reqs_before_tick": "0",
+        "I17_reqs": "1",
+        "I17_body_has_clip": "true",
+        "I17_prompt": "default",
+        "I17_send_text": "XYZ",
+        "I17b_reqs_before_tick": "0",
+        "I17b_reqs_after": "0",
+        "I17b_log_empty": "true",
+        "I17c_reqs": "1",
+        "I17c_body_has_4": "true",
+        "I17c_body_has_6": "false",
+        "I17c_log_trunc": "true",
+        "I17d_ret": "2",
+        "I17d_reqs": "0",
+        # I30–I34: 上下文按字算 / 分次上屏拼句 / 汉字判定 / 写法校验
+        "I30_pair_q": "鹦鹉最爱吃什么",
+        "I30_last_user": "多少种罗非鱼",
+        "I31_roles": "system,user,assistant,user",
+        "I32_reqs": "0",
+        "I32_log_nocjk": "true",
+        "I32b_reqs": "1",
+        "I33_log_bad": "true",
+        "I33_injected": "",
+        "I34_log_bad": "true",
+        "I34_injected": "",
         # E: broken dll_dir
         "E_good_entry_removed": "true",
         "E_cpath_clean": "true",
