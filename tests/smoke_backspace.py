@@ -108,8 +108,9 @@ LUA_SRC = r"""
 local logs = {}
 rime_api = { get_user_data_dir = function() return USERDIR end }
 log = {
-  info  = function(m) logs[#logs + 1] = "info: " .. tostring(m) end,
-  error = function(m) logs[#logs + 1] = "error: " .. tostring(m) end,
+  info    = function(m) logs[#logs + 1] = "info: " .. tostring(m) end,
+  warning = function(m) logs[#logs + 1] = "warning: " .. tostring(m) end,
+  error   = function(m) logs[#logs + 1] = "error: " .. tostring(m) end,
 }
 
 -- keep the real clock for busy-waiting, then fake os.clock so actions.lua's
@@ -177,6 +178,14 @@ local function new_env(config)
       return self.list[n].text
     end,
   }
+  -- context 属性：处理器和滤波器之间靠它传消息（候选文字、拼音、AI 结果）
+  ctx.props = {}
+  ctx.set_property = function(self, name, value) self.props[name] = value end
+  ctx.get_property = function(self, name) return self.props[name] end
+  ctx.refreshed = 0
+  ctx.refresh_non_confirmed_composition = function(self)
+    self.refreshed = self.refreshed + 1
+  end
   local env = { engine = { context = ctx } }
   if config then env.engine.schema = { config = config } end
   return env, ctx
@@ -1987,6 +1996,291 @@ do
 end
 
 -- =====================================================================
+-- I38. AI 拼音候选：开关、拼音闸门、去抖、结果校验
+do
+  local cfgI38 = cfg_plain({
+    ["actions/trigger"]             = "qq/",
+    ["actions/dll_dir"]             = DLLREL,
+    ["actions/debounce_ms"]         = 0,
+    ["actions/ai_pinyin/enabled"]   = true,
+    ["actions/ai_pinyin/debounce_ms"] = 400,
+    ["actions/ai/online/base_url"]  = "https://example.test/v1/chat/completions",
+    ["actions/ai/online/api_key"]   = "sk-py",
+  })
+  local envI38, ctxI38 = new_env(cfgI38)
+  logs = {}
+  revert.init(envI38)
+  rec("I38_ready", tostring(envI38.ai_pinyin ~= nil))
+  rec("I38_off_at_start", tostring(envI38.ai_pinyin and envI38.ai_pinyin.on))
+
+  -- aiur; 打开
+  ctxI38.input = "aiur"
+  rec("I38_ret", feed(revert, envI38, ctxI38, key(0x3B)))
+  rec("I38_on", tostring(envI38.ai_pinyin and envI38.ai_pinyin.on))
+  rec("I38_live_py", tostring(envI38.ai_pinyin and envI38.ai_pinyin.prefix))
+
+  -- 第一候选没有拼音（自定义短语、日期这类）：一个请求都不发
+  requests, nudges = {}, {}
+  ctxI38.input = "jys"
+  ctxI38.props["ai_pinyin/first"] = "\u{9759}\u{591c}\u{601d}"
+  ctxI38.props["ai_pinyin/first_py"] = ""
+  feed(revert, envI38, ctxI38, key(0x87))
+  feed(revert, envI38, ctxI38, key(0x87))
+  rec("I38_nopy_reqs", tostring(#requests))
+
+  -- 有拼音：第一下只计时，第二下才发
+  ctxI38.input = "nihc"
+  ctxI38.props["ai_pinyin/first"] = "\u{4f60}\u{597d}"
+  ctxI38.props["ai_pinyin/first_py"] = "ni hao"
+  ctxI38.props["ai_pinyin/map"] = "\u{4f60}\u{597d}\tni hao\n\u{62df}\u{597d}\tni hao\n\u{6ce5}\u{84bf}\tni hao"
+  requests, nudges = {}, {}
+  feed(revert, envI38, ctxI38, key(0x87))
+  rec("I38_wait_reqs", tostring(#requests))
+  feed(revert, envI38, ctxI38, key(0x87))
+  rec("I38_reqs", tostring(#requests))
+  rec("I38_user", requests[1] and (requests[1].body:match('"role":"user","content":"(.-)"') or "") or "")
+  rec("I38_url", requests[1] and requests[1].url or "")
+  rec("I38_auth", requests[1] and (requests[1].headers:find("Bearer sk%-py") and "yes" or "no") or "")
+  local sys = requests[1] and (requests[1].body:match('"role":"system","content":"(.-)"') or "") or ""
+  rec("I38_system_has_prompt", tostring(sys:find("拼音") ~= nil))
+
+  -- 2 个字配 2 个音节 -> 挂到属性上并主动刷新候选
+  req_state = "done"
+  result_body = '{"choices":[{"message":{"content":"\u{60a8}\u{597d}"}}]}'
+  local before = ctxI38.refreshed
+  feed(revert, envI38, ctxI38, key(0x87))
+  rec("I38_result", ctxI38.props["ai_pinyin/result"] or "")
+  rec("I38_result_sig", ctxI38.props["ai_pinyin/result_sig"] or "")
+  rec("I38_refreshed", tostring(ctxI38.refreshed > before))
+
+  -- 字数与音节数不符 -> 不采纳
+  requests = {}
+  ctxI38.input = "nihma"
+  ctxI38.props["ai_pinyin/first_py"] = "ni hao ma"
+  ctxI38.props["ai_pinyin/result"] = ""
+  req_state = "idle"
+  feed(revert, envI38, ctxI38, key(0x87))
+  feed(revert, envI38, ctxI38, key(0x87))
+  rec("I38_mismatch_reqs", tostring(#requests))
+  req_state = "done"
+  result_body = '{"choices":[{"message":{"content":"\u{4f60}\u{597d}"}}]}'
+  logs = {}
+  feed(revert, envI38, ctxI38, key(0x87))
+  rec("I38_mismatch_result", ctxI38.props["ai_pinyin/result"] or "")
+  rec("I38_mismatch_log", tostring(log_has("数量不符")))
+
+  -- 同一条输入失败后进入冷却：再来 tick 不再发请求
+  envI38.ai_pinyin.retry = 600000
+  requests = {}
+  req_state = "idle"
+  feed(revert, envI38, ctxI38, key(0x87))
+  feed(revert, envI38, ctxI38, key(0x87))
+  rec("I38_retry_reqs", tostring(#requests))
+
+  -- 换了输入（新的签名）照常发
+  ctxI38.input = "nihd"
+  ctxI38.props["ai_pinyin/first_py"] = "ni hao"
+  feed(revert, envI38, ctxI38, key(0x87))
+  feed(revert, envI38, ctxI38, key(0x87))
+  rec("I38_retry_new_sig", tostring(#requests))
+
+  -- 回答里带标点 -> 不采纳
+  requests = {}
+  ctxI38.input = "nihb"
+  ctxI38.props["ai_pinyin/first_py"] = "ni hao"
+  req_state = "idle"
+  feed(revert, envI38, ctxI38, key(0x87))
+  feed(revert, envI38, ctxI38, key(0x87))
+  req_state = "done"
+  result_body = '{"choices":[{"message":{"content":"\u{4f60}\u{597d}\u{3002}"}}]}'
+  feed(revert, envI38, ctxI38, key(0x87))
+  rec("I38_punct_result", ctxI38.props["ai_pinyin/result"] or "")
+
+  -- 再按一次触发码 -> 关掉
+  ctxI38.input = "aiur"
+  rec("I38_off_ret", feed(revert, envI38, ctxI38, key(0x3B)))
+  rec("I38_off", tostring(envI38.ai_pinyin and envI38.ai_pinyin.on))
+
+  -- 打开后按 Esc：只丢掉这次等待，模式仍然开着
+  ctxI38.input = "aiur"
+  feed(revert, envI38, ctxI38, key(0x3B))
+  rec("I38_on2", tostring(envI38.ai_pinyin and envI38.ai_pinyin.on))
+  ctxI38.input = "nihc"
+  envI38.ai_pinyin.req = { seq = 1, sig = "nihc", started = os.clock() }
+  feed(revert, envI38, ctxI38, key(0xFF1B))
+  rec("I38_esc_off", tostring(envI38.ai_pinyin and envI38.ai_pinyin.on))
+  rec("I38_esc_req", tostring(envI38.ai_pinyin and envI38.ai_pinyin.req ~= nil))
+  revert.fini(envI38)
+end
+
+-- I38c. 模型挑的就是当前第一位 -> 不插入
+do
+  local cfgI38c = cfg_plain({
+    ["actions/trigger"]             = "qq/",
+    ["actions/dll_dir"]             = DLLREL,
+    ["actions/debounce_ms"]         = 0,
+    ["actions/ai_pinyin/enabled"]   = true,
+    ["actions/ai_pinyin/debounce_ms"] = 400,
+    ["actions/ai/online/base_url"]  = "https://example.test/v1/chat/completions",
+    ["actions/ai/online/api_key"]   = "sk-py",
+  })
+  local envI38c, ctxI38c = new_env(cfgI38c)
+  logs = {}
+  revert.init(envI38c)
+  ctxI38c.input = "aiur"
+  feed(revert, envI38c, ctxI38c, key(0x3B))
+  ctxI38c.input = "nihc"
+  ctxI38c.props["ai_pinyin/first"] = "\u{4f60}\u{597d}"
+  ctxI38c.props["ai_pinyin/first_py"] = "ni hao"
+  ctxI38c.props["ai_pinyin/map"] = "\u{4f60}\u{597d}\tni hao\n\u{62df}\u{597d}\tni hao"
+  requests, nudges = {}, {}
+  feed(revert, envI38c, ctxI38c, key(0x87))
+  feed(revert, envI38c, ctxI38c, key(0x87))
+  rec("I38c_reqs", tostring(#requests))
+  req_state = "done"
+  result_body = '{"choices":[{"message":{"content":"\u{4f60}\u{597d}"}}]}'
+  local before = ctxI38c.refreshed
+  feed(revert, envI38c, ctxI38c, key(0x87))
+  rec("I38c_result", ctxI38c.props["ai_pinyin/result"] or "")
+  rec("I38c_refreshed", tostring(ctxI38c.refreshed > before))
+  rec("I38c_log", tostring(log_has("is the first candidate already")))
+  revert.fini(envI38c)
+end
+
+-- I38b. 没开 actions/ai_pinyin/enabled 时触发码不生效
+do
+  local cfgI38b = cfg_plain({
+    ["actions/trigger"] = "qq/",
+    ["actions/dll_dir"] = DLLREL,
+    ["actions/debounce_ms"] = 0,
+  })
+  local envI38b, ctxI38b = new_env(cfgI38b)
+  revert.init(envI38b)
+  rec("I38b_ready", tostring(envI38b.ai_pinyin == nil))
+  ctxI38b.input = "aiur"
+  rec("I38b_ret", feed(revert, envI38b, ctxI38b, key(0x3B)))
+  rec("I38b_input", ctxI38b.input)
+  revert.fini(envI38b)
+end
+
+-- I39. 两个滤波器的行为：捕获拼音 / 插 AI 候选
+do
+  _G.yield = function(c) _G.__cap[#_G.__cap + 1] = c.text end
+  _G.Candidate = function(kind, start, stop, text, comment)
+    return { kind = kind, start = start, _end = stop, text = text, comment = comment }
+  end
+  _G.__cap = {}
+
+  local function fake_input(list)
+    return { iter = function()
+      local i = 0
+      return function() i = i + 1; return list[i] end
+    end }
+  end
+
+  -- 捕获滤波器：把 comment 里的带调拼音去调后写进属性
+  local capture = loadfile(ACTIONS_DIR .. "/ai_pinyin_capture.lua")()
+  local props = {}
+  local ctx = { input = "nihc", props = props }
+  ctx.get_property = function(self, n) return self.props[n] end
+  ctx.set_property = function(self, n, v) self.props[n] = v end
+  local env = { engine = { context = ctx } }
+
+  -- 模式没开（没有 ai_pinyin/active）：两个滤波器都不许写属性、不许改候选
+  capture.func(fake_input({
+    { text = "\u{4f60}\u{597d}", comment = "nǐ;rx hǎo;nz" },
+  }), env)
+  rec("I39b_capture_props", tostring(next(props) ~= nil))
+  _G.__cap = {}
+  local insert0 = loadfile(ACTIONS_DIR .. "/ai_pinyin_insert.lua")()
+  insert0.func(fake_input({
+    { text = "\u{4f60}\u{597d}", start = 0, _end = 4 },
+    { text = "\u{59ae}", start = 0, _end = 2 },
+  }), env)
+  rec("I39b_insert_order", table.concat(_G.__cap, ","))
+  rec("I39b_insert_props", tostring(next(props) ~= nil))
+
+  props["ai_pinyin/active"] = "1"
+  capture.func(fake_input({
+    { text = "\u{4f60}\u{597d}", comment = "nǐ;rx hǎo;nz" },
+    { text = "\u{59ae}", comment = "" },
+  }), env)
+  rec("I39_map", props["ai_pinyin/map"] or "")
+
+  -- 插入滤波器：编码一致时 AI 词排第一，其余原样原顺序
+  local insert = loadfile(ACTIONS_DIR .. "/ai_pinyin_insert.lua")()
+  props["ai_pinyin/result"] = "\u{60a8}\u{597d}"
+  props["ai_pinyin/result_sig"] = "nihc"
+  props["ai_pinyin/marker"] = "AI"
+  _G.__cap = {}
+  insert.func(fake_input({
+    { text = "\u{4f60}\u{597d}", start = 0, _end = 4 },
+    { text = "\u{59ae}", start = 0, _end = 2 },
+  }), env)
+  rec("I39_order", table.concat(_G.__cap, ","))
+  rec("I39_first_py", props["ai_pinyin/first_py"] or "")
+
+  -- 编码变了：不插 AI 词
+  props["ai_pinyin/result_sig"] = "other"
+  _G.__cap = {}
+  insert.func(fake_input({
+    { text = "\u{4f60}\u{597d}", start = 0, _end = 4 },
+    { text = "\u{59ae}", start = 0, _end = 2 },
+  }), env)
+  rec("I39_stale", table.concat(_G.__cap, ","))
+
+  _G.yield = nil
+  _G.Candidate = nil
+  _G.__cap = nil
+end
+
+-- I40. 手按退格要跟着扣账本（编码中 / 按住修饰键 / 注入回环 都不记）
+do
+  local cfgI40 = cfg_plain({
+    ["actions/trigger"]     = "qq/",
+    ["actions/dll_dir"]     = DLLREL,
+    ["actions/debounce_ms"] = 0,
+    ["actions/shortcuts"]   = "dd;=@delete",
+  })
+  local envI40, ctxI40 = new_env(cfgI40)
+  revert.init(envI40)
+
+  local function delete_newest()
+    injected = {}
+    ctxI40.input = "dd"
+    feed(revert, envI40, ctxI40, key(0x3B))
+    return tostring(injected[1] or "")
+  end
+
+  -- 1) 上屏 3 个字，手按一次退格 -> 账本只剩 2 个
+  commit(ctxI40, "\u{4f60}\u{597d}\u{5417}")
+  local ret_bs = feed(revert, envI40, ctxI40, key(0xFF08))
+  rec("I40_ret", tostring(ret_bs))
+  rec("I40_after_one", delete_newest())
+
+  -- 2) 编码还在时按退格：删的是编码，账本不动
+  commit(ctxI40, "\u{4f60}\u{597d}\u{5417}")
+  ctxI40.input = "ni"
+  feed(revert, envI40, ctxI40, key(0xFF08))
+  ctxI40.input = ""
+  rec("I40_composing", delete_newest())
+
+  -- 3) 注入期的退格不重复扣账
+  commit(ctxI40, "\u{4f60}\u{597d}")
+  envI40.bs_ignore = 2
+  envI40.bs_ignore_until = os.clock() + 100
+  feed(revert, envI40, ctxI40, key(0xFF08))
+  feed(revert, envI40, ctxI40, key(0xFF08))
+  rec("I40_suppressed", delete_newest())
+
+  -- 4) 带 Shift 的退格（选中后删除）不记
+  commit(ctxI40, "\u{4f60}\u{597d}\u{5417}")
+  feed(revert, envI40, ctxI40, key(0xFF08, { shift = true }))
+  rec("I40_shifted", delete_newest())
+
+  revert.fini(envI40)
+end
+
 -- F. end-to-end async path, using the counting-only dry-run dll
 -- =====================================================================
 logs = {}                           -- only look at what F itself logs
@@ -2092,6 +2386,7 @@ def main():
     lua_src = lua_src.replace("USERDIR", repr(USERDIR_ON_DISK.replace("\\", "/")))
     lua_src = lua_src.replace("DLLREL", repr(DLL_REL_DIR))
     lua_src = lua_src.replace("ACTIONS_PATH", repr(os.path.join(BASE, "actions.lua").replace("\\", "/")))
+    lua_src = lua_src.replace("ACTIONS_DIR", repr(BASE.replace("\\", "/")))
 
     # debug aid: SMOKE_SKIP_F=1 drops the async end-to-end scenario
     skip_f = bool(os.environ.get("SMOKE_SKIP_F"))
@@ -2347,7 +2642,7 @@ def main():
         "I11_user": "你好世界",
         "I11_log_prompt": "eng",
         "I18_roles": "system,user,assistant,user",
-        "I18_system": "你是中文写作助手。把用户给你的文字整理通顺，保持原意和语气，只输出结果正文，不要解释、不要加引号。",
+        "I18_system": "你是中文输入助手。如果是问题就进行精准简短的回复，如果是诗词或名句就回复原文和作者等。只输出结果正文，不要解释、不要提问、不加引号。每一次接收到的内容，单独回复不要理会之前提交的内容。",
         "I18_pair_q": "鹦鹉最爱吃什么",
         "I18_pair_a": "A1",
         "I18_last_user": "多少种罗非鱼",
@@ -2476,6 +2771,53 @@ def main():
         "I36_debug_on": "true",
         "I36_info_back": "true",
         # I37: 快符补记（commit_history）
+        # I38: AI 拼音候选
+        "I38_ready": "true",
+        "I38_off_at_start": "false",
+        "I38_ret": "1",
+        "I38_on": "true",
+        "I38_live_py": "aiur",
+        "I38_nopy_reqs": "0",
+        "I38_wait_reqs": "0",
+        "I38_reqs": "1",
+        "I38_user": "拼音：ni hao\\n现有候选：你好 / 拟好 / 泥蒿",
+        "I38_url": "https://example.test/v1/chat/completions",
+        "I38_auth": "yes",
+        "I38_system_has_prompt": "true",
+        "I38_result": "\u60a8\u597d",
+        "I38_result_sig": "nihc",
+        "I38_refreshed": "true",
+        "I38_mismatch_reqs": "1",
+        "I38_mismatch_result": "",
+        "I38_mismatch_log": "true",
+        "I38_punct_result": "",
+  "I38_retry_reqs": "0",
+  "I38_retry_new_sig": "1",
+        "I38_off_ret": "1",
+        "I38_off": "false",
+        "I38_on2": "true",
+        "I38_esc_off": "true",
+        "I38_esc_req": "false",
+        "I38c_reqs": "1",
+        "I38c_result": "",
+        "I38c_refreshed": "false",
+        "I38c_log": "true",
+        "I38b_ready": "true",
+        "I38b_ret": "2",
+        "I38b_input": "aiur;",
+        # I39: 滤波器
+        "I39b_capture_props": "false",
+        "I39b_insert_order": "\u4f60\u597d,\u59ae",
+        "I39b_insert_props": "false",
+  "I40_ret": "2",
+  "I40_after_one": "2",
+  "I40_composing": "3",
+  "I40_suppressed": "2",
+  "I40_shifted": "3",
+        "I39_map": "\u4f60\u597d\tni hao",
+        "I39_order": "\u60a8\u597d,\u4f60\u597d,\u59ae",
+        "I39_first_py": "ni hao",
+        "I39_stale": "\u4f60\u597d,\u59ae",
         "I37_hist_ready": "true",
         "I37_ret": "2,2,1",
         "I37_injected": "1",

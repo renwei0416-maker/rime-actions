@@ -85,3 +85,17 @@ patch:
   # 自定义提示词：
   #"actions/ai/prompts/polish": "你是中文润色助手。把用户给的一句话改写得更通顺，只输出改写后的句子，不要解释。"
   #"actions/shortcuts": "@defaults p;=@ai:polish"
+
+  # ---------- 11. AI 拼音候选（筛选 / 纠错，默认关闭）----------
+  # 还要把 ai_pinyin_capture.lua、ai_pinyin_insert.lua 放进同一目录，并接两行滤波器：
+  #   "engine/filters/@before 5": lua_filter@*<你的目录>.ai_pinyin_capture   # 排 super_comment_preedit 之前
+  #   "engine/filters/@before 17": lua_filter@*<你的目录>.ai_pinyin_insert   # 排 uniquifier 之前
+  # 接口与方式四共用（actions/ai/provider 与 online|local 那组），这里只写它自己的项。
+  #"actions/ai_pinyin/enabled": true
+  #"actions/ai_pinyin/trigger": "aiur;"          # 进 / 出这个模式的触发码
+  #"actions/ai_pinyin/debounce_ms": 400          # 停手多久才发请求（0~5000）
+  #"actions/ai_pinyin/context_chars": 160        # 附给模型的上文字数（0~5000）
+  #"actions/ai_pinyin/max_chars": 12             # 最多几个音节，超了不发（1~32）
+  #"actions/ai_pinyin/send_candidates": 5        # 连同前几个候选一起发给模型；0 = 只发拼音
+  #"actions/ai_pinyin/marker": "AI"              # 候选注释里的标记
+  #"actions/ai_pinyin/retry_ms": 10000           # 失败后冷却多久再试（0~600000）

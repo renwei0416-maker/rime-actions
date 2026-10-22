@@ -1,7 +1,8 @@
 # rime-actions（上屏动作）
 
 给小狼毫（Rime / Weasel）用的一个扩展：字上屏之后，用几个触发码把它**撤回、选中、复制、删除**，
-或者拿去搜索、交给 AI 处理。
+或者拿去搜索、交给 AI 处理。还带一个可选的 AI 拼音候选：把当前拼音和已有候选交给模型，挑一个更
+合适的或者生成一个更合适的排到第一位。
 
 它不改变打字方式，只在你敲出触发码时替你按几下键。
 
@@ -14,6 +15,7 @@
 | 快捷触发码 | `z;`、`ss;`、`f;` | 替你按常用快捷键（撤销、选到行首、搜索…） |
 | AI 模式 | `ai;` 进入，打字后连按两下 `/` | 把文字发给模型，回复直接写到光标处 |
 | 剪贴板 | AI 模式下 `Ctrl+Alt+;` | 把剪贴板里的文字直接发给模型（`actions/ai/clip_key` 可改） |
+| AI 拼音候选 | `aiur;` 进入后照常打拼音 | 把拼音和已有候选交给模型，挑一个（或另造一个）排到候选第一位；选中才上屏 |
 
 两个辅助开关：`"actions/history_ledger": true`（默认开，把万象快符这类绕过上屏通知的文字也补进上屏记录，否则回删会少删一个）、`"actions/debug": true`（默认 `false` 只写错误，排查时才打开）。
 
@@ -44,6 +46,8 @@
 | --- | --- |
 | `actions.lua` | Rime Lua 组件（`lua_processor`）：记账、识别触发码、算出要删多少字 |
 | `actions.c` / `actions.dll` | 很小的 C 模块：真正把按键发出去（退格 / 组合键 / 打开网址 / 请求接口 / 打字） |
+| `ai_pinyin_capture.lua` | 可选滤波器（`lua_filter`）：读候选的词典拼音，写进 context 属性 |
+| `ai_pinyin_insert.lua` | 可选滤波器（`lua_filter`）：把 AI 挑出的词插到候选第一位 |
 
 > ⚠️ 它会向当前窗口**注入真实按键**，也会改动文档内容。先在记事本里试。
 
@@ -64,7 +68,21 @@
    文件在 `lua\myfolder\actions.lua`，模块名就是 `myfolder.actions`。
    放在处理器链最前面是有意的：排在 `recognizer`、`key_binder`、`punctuator` 后面时，
    触发码可能先被它们吃掉。
-4. 托盘图标右键 → **重新部署**。
+4. （可选）用 AI 拼音候选时，把 `ai_pinyin_capture.lua`、`ai_pinyin_insert.lua` 放进同一目录，
+   再接两行滤波器 —— 一个要排在 `super_comment_preedit` 之前（那时候选注释里还是词典拼音），
+   一个排在 `uniquifier` 之前：
+
+   ```yaml
+   patch:
+     "engine/filters/@before 5": lua_filter@*myfolder.ai_pinyin_capture
+     "engine/filters/@before 17": lua_filter@*myfolder.ai_pinyin_insert
+     "actions/ai_pinyin/enabled": true
+   ```
+
+   两个 `@before` 的数字按你方案里 `engine/filters` 的条目数算：`capture` 要插在
+   `super_comment_preedit` 前面，`insert` 要在 `uniquifier` 前面。下标不对时日志里会写
+   `module … not found`，或候选注释里读不到拼音、一个请求都不发。
+5. 托盘图标右键 → **重新部署**。
 
 ## 配置
 
@@ -78,11 +96,11 @@ python tests\smoke_backspace.py
 ```
 
 需要 Python 3.12、MSYS2 mingw64 gcc、装好的小狼毫。脚本先现编一份 `-DACTIONS_DRY_RUN`
-的"只记账、不注入"的 dll，再跑 378 项断言（触发码、记账、去抖、26 项快捷键、多步、
-删到符号、浏览器搜索、AI、配置校验）。路径可用环境变量覆盖：
+的"只记账、不注入"的 dll，再跑 423 项断言（触发码、记账、退格扣账、去抖、26 项快捷键、多步、
+删到符号、浏览器搜索、AI、AI 拼音候选、配置校验）。路径可用环境变量覆盖：
 `MINGW_BIN`、`WEASEL_DIR`、`RIME_DLL`、`DLLDIR`。
 
-全部通过时输出 `CHECKS: 378 asserted, ALL PASS`，进程退出码 0。
+全部通过时输出 `CHECKS: 423 asserted, ALL PASS`，进程退出码 0。
 
 ## 限制
 
@@ -93,7 +111,8 @@ python tests\smoke_backspace.py
 - `Ctrl+Shift+←/→` 可能被 Windows 的"切换键盘布局"热键抢走：到
   「设置 → 时间和语言 → 输入 → 高级键盘设置 → 输入语言热键」把它改成**未分配**，
   之后用 `Win+Space` 切输入法。
-- AI 会把文字发到网上（只有开启并触发时才发），回复直接写进当前光标处。
+- AI 会把文字发到网上（只有开启并触发时才发），回复直接写进当前光标处。iur; 的 AI 拼音候选同样要联网，只在停手后发一次拼音和已有候选。
+- AI 拼音候选只对候选注释里带拼音的词有效：自定义短语、日期、英文、super_replacer 派生出来的候选通常没有拼音，会直接跳过（不发请求）。它给的是候选，选中才上屏。
 - 只测过 x64 的小狼毫；ARM64 需要重新编译。
 
 ## 许可

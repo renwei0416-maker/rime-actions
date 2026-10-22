@@ -111,6 +111,16 @@ local DEFAULTS = {
     ai_local_think_off = false,
     ai_local_max_tokens = 1024,
     ai_local_temperature = 0.7,
+
+    -- AI 拼音候选（可选，默认关闭）：打字时把 AI 补出的词挂到候选第一位
+    ai_pinyin_enabled = false,
+    ai_pinyin_trigger = "aiur;",
+    ai_pinyin_debounce = 400,
+    ai_pinyin_context_chars = 160,
+    ai_pinyin_max_chars = 12,
+    ai_pinyin_send_candidates = 5,
+    ai_pinyin_marker = "AI",
+    ai_pinyin_retry = 10000,
 }
 
 -- 安全上限：只用来挡住异常大的配置值，正常使用碰不到。
@@ -129,6 +139,11 @@ local LIMITS = {
     ai_nudge_interval = 60000,
     ai_max_wait_s  = 600,
     ai_max_tokens  = 100000,
+
+    ai_pinyin_debounce = 5000,
+    ai_pinyin_max_chars = 32,
+    ai_pinyin_send_candidates = 50,
+    ai_pinyin_retry = 600000,
 }
 
 -- 把 actions/trigger 写成下面任一个值 = 关掉文本触发（只留组合键 / 快捷键）
@@ -676,6 +691,10 @@ local function inject_backspaces(env, count)
         log.info(string.format("actions.lua: dll accepted %d of %d backspaces", accepted, count))
     end
     consume_from_stack(env, accepted)
+
+    -- 注入的退格会重新进输入法钩子：这段时间内别把它们当成"手按退格"再扣一次
+    env.bs_ignore = (env.bs_ignore or 0) + accepted
+    env.bs_ignore_until = os.clock() + 3
     return true
 end
 
@@ -843,7 +862,9 @@ end
 -- ===========================================================================
 
 local AI_PROMPTS = {
-    default = "你是中文写作助手。把用户给你的文字整理通顺，保持原意和语气，只输出结果正文，不要解释、不要加引号。",
+    default = "你是中文输入助手。如果是问题就进行精准简短的回复，如果是诗词或名句就回复原文和作者等。"
+        .. "只输出结果正文，不要解释、不要提问、不加引号。"
+        .. "每一次接收到的内容，单独回复不要理会之前提交的内容。",
     eng     = "Translate the user's Chinese text into natural, idiomatic English. Output only the translation, no explanations, no quotes.",
     jp      = "把用户的中文翻译成自然、地道的日语。只输出译文，不要解释，不要加引号。",
 }
@@ -1453,8 +1474,9 @@ end
 -- 返回 true = 已安排；false = 这次没成（dll 忙或出错），由调用方决定是否重试。
 local function ai_insert_text(env, cut, text)
     local ok, ret
+    local merged = (cut > 0 and Actions.press_backspace_then_text) and true or false
 
-    if cut > 0 and Actions.press_backspace_then_text then
+    if merged then
         ok, ret = pcall(Actions.press_backspace_then_text, cut, text)
         if not ok then
             if log and log.error then
@@ -1482,6 +1504,12 @@ local function ai_insert_text(env, cut, text)
             log.info("actions.lua: ai: the dll refused to insert the answer")
         end
         return false
+    end
+    if merged and cut > 0 then
+        -- 合并接口自己删掉的那几个字：账本扣掉，并挡住回环回来的退格
+        consume_from_stack(env, cut)
+        env.bs_ignore = (env.bs_ignore or 0) + cut
+        env.bs_ignore_until = os.clock() + 3
     end
     return true
 end
@@ -1771,6 +1799,451 @@ local function ai_handle_key(key, env)
     return nil
 end
 
+-- ------------------------------------------------------- AI 拼音候选（可选）
+-- 拼音来自 ai_pinyin_capture.lua：它排在 super_comment_preedit 之前，只读不改，
+-- 把「候选文字 + 词库带调拼音」写进 context 属性 ai_pinyin/map。
+-- 候选插入由 ai_pinyin_insert.lua 完成：它排在 uniquifier 之前，把 AI 词放第一位。
+-- 这里只负责开关、去抖、发请求、取结果、刷新候选。
+local AI_PINYIN_PROMPT = [[
+你是拼音输入法的补全工具。用户会给你三样东西：
+1. 一串无声调拼音，音节之间用空格分开；
+2. 输入法现有的前几个候选词；
+3. 光标前的一小段上文（可能为空）。
+请结合上文判断用户真正想打哪个词：先看看现有的候选是否合理，合理就把它原样输出；
+如果候选中的词不合理时，你再按拼音另造一个。要求：
+- 汉字个数必须等于拼音音节数；
+- 每个字的读音必须与对应的音节一致；
+- 只输出这一个词，不要标点、空格、拼音或解释；]]
+
+local function ai_pinyin_is_cjk(cp)
+    return (cp >= 0x4E00 and cp <= 0x9FFF) or (cp >= 0x3400 and cp <= 0x4DBF)
+end
+
+-- 返回 字数, 是否全是汉字
+local function ai_pinyin_count(text)
+    local n = 0
+    for _, ch in ipairs(to_chars(text)) do
+        local ok, cp = pcall(utf8.codepoint, ch)
+        if not ok or not ai_pinyin_is_cjk(cp) then
+            return n, false
+        end
+        n = n + 1
+    end
+    return n, n > 0
+end
+
+local function ai_pinyin_clean(text)
+    if type(text) ~= "string" then return "" end
+    return (text:gsub("%s+", ""))
+end
+
+local function ai_pinyin_clear(env)
+    local ctx = env.engine and env.engine.context
+    if ctx and ctx.set_property then
+        pcall(ctx.set_property, ctx, "ai_pinyin/result", "")
+        pcall(ctx.set_property, ctx, "ai_pinyin/result_sig", "")
+    end
+end
+
+-- 结果到达时没有按键事件，要主动重算候选才看得见
+local function ai_pinyin_publish(env, text, sig)
+    local st = env.ai_pinyin
+    local ctx = env.engine and env.engine.context
+    if not (st and ctx) then return end
+    if ctx.set_property then
+        pcall(ctx.set_property, ctx, "ai_pinyin/result", text)
+        pcall(ctx.set_property, ctx, "ai_pinyin/result_sig", sig)
+        pcall(ctx.set_property, ctx, "ai_pinyin/marker", st.marker)
+    end
+    if ctx.refresh_non_confirmed_composition then
+        pcall(ctx.refresh_non_confirmed_composition, ctx)
+    end
+end
+
+-- 叫醒输入法：Lua 只在有事件时被调用，请求和结果都得靠定时敲一下这个空键
+local function ai_pinyin_schedule(env, st)
+    if not (Actions and Actions.nudge and env.ai_nudge) then return end
+    local now = os.clock()
+    if env.ai_pinyin_nudge_at and now < env.ai_pinyin_nudge_at then return end
+    local interval = st.nudge_interval
+    env.ai_pinyin_nudge_at = now + (interval / 1000) * 0.9
+    pcall(Actions.nudge, interval, st.nudge_key)
+end
+
+local function ai_pinyin_fail(env, st, reason, sig)
+    st.req = nil
+    -- 同一串拼音失败过就先冷却一会儿，别每个 tick 重复问同一个问题
+    if sig and sig ~= "" and (st.retry or 0) > 0 then
+        st.fail = st.fail or {}
+        local n = 0
+        for _ in pairs(st.fail) do n = n + 1 end
+        if n > 16 then st.fail = {} end
+        st.fail[sig] = os.clock() * 1000 + st.retry
+    end
+    ai_pinyin_clear(env)
+    if reason and reason ~= "" then
+        log.warning("actions.lua: ai_pinyin: " .. reason)
+    end
+end
+
+local function ai_pinyin_accept(env, st, body)
+    local req = st.req
+    st.req = nil
+    if not req then return end
+    local content = ai_pinyin_clean(json_string_field(body or "", "content"))
+    if content == "" then
+        ai_pinyin_fail(env, st, "回答里没有可用文字 (pinyin=" .. req.pinyin .. ")", req.sig)
+        return
+    end
+    if content:upper() == "NONE" then
+        ai_pinyin_fail(env, st, "模型说无法确定 (pinyin=" .. req.pinyin .. ")", req.sig)
+        return
+    end
+    local count, ok = ai_pinyin_count(content)
+    if not ok then
+        ai_pinyin_fail(env, st, "回答里有非汉字 (pinyin=" .. req.pinyin .. "): "
+            .. ai_preview(content, 20), req.sig)
+        return
+    end
+    if count ~= req.syllables then
+        ai_pinyin_fail(env, st, string.format(
+            "回答 %d 个字，拼音 %d 个音节，数量不符 (pinyin=%s): %s",
+            count, req.syllables, req.pinyin, ai_preview(content, 20)), req.sig)
+        return
+    end
+    st.done[req.sig] = content
+    if req.first and content == req.first then
+        -- 模型挑的就是眼下第一位，插进去只是多一行一样的词
+        if log and log.info then
+            log.info(string.format(
+                "actions.lua: ai_pinyin: %s is the first candidate already, nothing to insert",
+                content))
+        end
+        return
+    end
+    if log and log.info then
+        log.info(string.format("actions.lua: ai_pinyin: %s <- %s", content, req.pinyin))
+    end
+    ai_pinyin_publish(env, content, req.sig)
+end
+
+-- 从 capture 写的 ai_pinyin/map 里取前 n 个候选的文字（顺序与候选窗一致）
+local function ai_pinyin_top_texts(env, st, n)
+    local ctx = env.engine and env.engine.context
+    if not (ctx and ctx.get_property and n and n > 0) then return {} end
+    local ok, raw = pcall(ctx.get_property, ctx, "ai_pinyin/map")
+    if not ok or type(raw) ~= "string" or raw == "" then return {} end
+    local names, seen = {}, {}
+    for line in raw:gmatch("[^\r\n]+") do
+        local text = line:match("^([^\t]+)")
+        if text and text ~= "" and not seen[text] then
+            seen[text] = true
+            names[#names + 1] = text
+            if #names >= n then break end
+        end
+    end
+    return names
+end
+
+local function ai_pinyin_send(env, st, sig, pinyin)
+    local words, syllables = {}, 0
+    for token in pinyin:gmatch("%S+") do
+        words[#words + 1] = token
+        syllables = syllables + 1
+    end
+    if syllables == 0 then return end
+    if syllables > st.max_chars then
+        if log and log.info then
+            log.info(string.format(
+                "actions.lua: ai_pinyin: %d syllables is over max_candidate_chars=%d, skipped",
+                syllables, st.max_chars))
+        end
+        return
+    end
+    local text = table.concat(words, " ")
+
+    -- 把现有候选一起发过去，模型可以只在里面挑，也可以另造
+    local top = ai_pinyin_top_texts(env, st, st.send_candidates)
+    local user_text = "拼音：" .. text
+    if #top > 0 then
+        user_text = user_text .. "\n现有候选：" .. table.concat(top, " / ")
+    end
+
+    local system_prompt = st.prompt
+    local before = ai_tail(ai_current_text(env), st.context_chars)
+    if before ~= "" then system_prompt = system_prompt .. "\n\n【上文】" .. before end
+
+    local parts = {}
+    parts[#parts + 1] = '{"model":"' .. json_escape(st.model or "") .. '","messages":['
+    parts[#parts + 1] = '{"role":"system","content":"' .. json_escape(system_prompt) .. '"},'
+    parts[#parts + 1] = '{"role":"user","content":"' .. json_escape(user_text) .. '"}],'
+    parts[#parts + 1] = string.format('"max_tokens":%d,"temperature":%.2f',
+        st.max_tokens or 64, st.temperature or 0.7)
+    if st.thought_off then
+        parts[#parts + 1] = ',"thinking":{"type":"disabled"}'
+    end
+    parts[#parts + 1] = "}"
+    local body = table.concat(parts)
+
+    local headers = { "Content-Type: application/json" }
+    if st.key and st.key ~= "" then
+        headers[#headers + 1] = "Authorization: Bearer " .. st.key
+    end
+
+    local ok, seq = pcall(Actions.http_request, st.url, body, table.concat(headers, "\r\n"))
+    if not ok then
+        ai_pinyin_fail(env, st, "http_request failed: " .. tostring(seq), sig)
+        return
+    end
+    if type(seq) ~= "number" or seq <= 0 then
+        ai_pinyin_fail(env, st, "request not sent (seq=" .. tostring(seq) .. ")", sig)
+        return
+    end
+    st.req = { seq = seq, sig = sig, pinyin = text, syllables = syllables,
+        first = top[1], started = os.clock() }
+    if log and log.info then
+        log.info(string.format("actions.lua: ai_pinyin: asked %d syllables (%s) seq=%d",
+            syllables, text, seq))
+    end
+    ai_pinyin_schedule(env, st)
+end
+
+local function ai_pinyin_tick(env)
+    local st = env.ai_pinyin
+    local ctx = env.engine and env.engine.context
+    if not (st and ctx) then return end
+    env.ai_pinyin_nudge_at = nil
+    local now = os.clock()
+
+    -- 1) 有请求在跑：看回来没有
+    if st.req then
+        local rsig = st.req.sig
+        local state
+        if Actions.http_state then
+            local ok, s = pcall(Actions.http_state)
+            if ok then state = s end
+        end
+        if state == "done" then
+            local ok, body = pcall(Actions.http_result)
+            if not ok then
+                ai_pinyin_fail(env, st, "http_result failed", rsig)
+            else
+                ai_pinyin_accept(env, st, body)
+            end
+            return
+        elseif state == "failed" then
+            local ok, _, err = pcall(Actions.http_result)
+            ai_pinyin_fail(env, st, "request failed - " .. tostring(ok and err or "unknown"), rsig)
+            return
+        elseif state ~= "running" then
+            ai_pinyin_fail(env, st, "request vanished (state=" .. tostring(state) .. ")", rsig)
+            return
+        end
+        if st.max_wait > 0 and (now - st.req.started) > st.max_wait then
+            if Actions.http_cancel then pcall(Actions.http_cancel) end
+            ai_pinyin_fail(env, st, "wait too long, cancelled", rsig)
+            return
+        end
+        ai_pinyin_schedule(env, st)
+        return
+    end
+
+    -- 2) 没有请求：决定发不发
+    if not st.on then return end
+    local sig = ctx.input or ""
+    if sig == "" then
+        st.seen_sig = nil
+        return
+    end
+    if st.done[sig] then
+        local shown = ""
+        if ctx.get_property then
+            local ok, value = pcall(ctx.get_property, ctx, "ai_pinyin/result_sig")
+            if ok and type(value) == "string" then shown = value end
+        end
+        if shown ~= sig then ai_pinyin_publish(env, st.done[sig], sig) end
+        return
+    end
+    local pinyin = ""
+    if ctx.get_property then
+        local ok, value = pcall(ctx.get_property, ctx, "ai_pinyin/first_py")
+        if ok and type(value) == "string" then pinyin = value end
+    end
+    if pinyin == "" then
+        -- 第一个候选没有可靠拼音（自定义短语、日期、英文这类），不动
+        st.seen_sig = nil
+        return
+    end
+    if st.fail and st.fail[sig] then
+        if now * 1000 < st.fail[sig] then return end
+        st.fail[sig] = nil
+    end
+    if sig ~= st.seen_sig then
+        st.seen_sig = sig
+        st.seen_at = now
+        ai_pinyin_schedule(env, st)
+        return
+    end
+    if (now - (st.seen_at or 0)) * 1000 < st.debounce then
+        ai_pinyin_schedule(env, st)
+        return
+    end
+    ai_pinyin_send(env, st, sig, pinyin)
+end
+
+-- 两个滤波器只在 ai_pinyin/active == "1" 时工作；模式关着就完全不写属性、不改候选，
+-- 跟没有接那两个滤波器一样。
+local function ai_pinyin_active(env, on)
+    local ctx = env.engine and env.engine.context
+    if ctx and ctx.set_property then
+        pcall(ctx.set_property, ctx, "ai_pinyin/active", on and "1" or "0")
+    end
+end
+
+local function ai_pinyin_toggle(env, st)
+    st.on = not st.on
+    st.seen_sig = nil
+    ai_pinyin_active(env, st.on)
+    if not st.on then
+        ai_pinyin_clear(env)
+        if log and log.info then log.info("actions.lua: ai_pinyin: off") end
+        return
+    end
+    local ctx = env.engine and env.engine.context
+    if ctx and ctx.set_property then
+        pcall(ctx.set_property, ctx, "ai_pinyin/marker", st.marker)
+    end
+    if log and log.info then log.info("actions.lua: ai_pinyin: on") end
+end
+
+local function ai_pinyin_handle_key(key, env)
+    local st = env.ai_pinyin
+    if not st then return nil end
+    local kc = key.keycode
+    local ctx = env.engine and env.engine.context
+
+    -- 唤醒键：先把这边到期的活干完；AI 模式也用它，那就交回去继续处理
+    if kc == st.nudge_key or kc == vk_to_keysym(st.nudge_key) then
+        if not key:release() then ai_pinyin_tick(env) end
+        if env.ai_enabled then return nil end
+        return kAccepted
+    end
+
+    if key:release() then return nil end
+
+    -- 开关触发码
+    if st.final_code and kc == st.final_code
+        and not (key:ctrl() or key:alt() or key:super())
+        and ctx and ctx.input == st.prefix then
+        if ctx.clear then pcall(ctx.clear, ctx) end
+        ai_pinyin_toggle(env, st)
+        return kAccepted
+    end
+
+    if not st.on then return nil end
+
+    -- Esc：只丢掉正在等的这次回答，模式照旧开着（退出模式只认触发码）
+    if kc == 0xFF1B and not (key:ctrl() or key:alt() or key:super()) then
+        if st.req then
+            st.req = nil
+            st.seen_sig = nil
+            pcall(Actions.http_cancel)
+            if log and log.info then log.info("actions.lua: ai_pinyin: cancelled by esc, mode kept") end
+        end
+        return nil
+    end
+
+    -- 还在打字：重新计时，等手停下来再发
+    if ctx and ctx.is_composing and ctx:is_composing() then
+        st.seen_sig = nil
+        ai_pinyin_schedule(env, st)
+    end
+    return nil
+end
+
+local function init_ai_pinyin(env, config)
+    env.ai_pinyin = nil
+    env.ai_pinyin_nudge_at = nil
+    if not cfg_bool(config, "actions/ai_pinyin/enabled", DEFAULTS.ai_pinyin_enabled) then
+        return
+    end
+    if not (Actions and Actions.http_request and Actions.http_state and Actions.http_result) then
+        log.error("actions.lua: ai_pinyin disabled - dll 里没有 http_request/http_state/http_result")
+        return
+    end
+
+    local spec = cfg_string(config, "actions/ai_pinyin/trigger", DEFAULTS.ai_pinyin_trigger)
+    if type(spec) ~= "string" or #spec < 2 or TRIGGER_OFF[spec:lower()] then
+        log.error("actions.lua: ai_pinyin disabled - bad trigger: " .. tostring(spec))
+        return
+    end
+
+    local st = {
+        on = false,
+        prefix = spec:sub(1, #spec - 1),
+        final_code = string.byte(spec, #spec),
+        marker = cfg_string(config, "actions/ai_pinyin/marker", DEFAULTS.ai_pinyin_marker),
+        debounce = cfg_int(config, "actions/ai_pinyin/debounce_ms",
+                           DEFAULTS.ai_pinyin_debounce, 0, LIMITS.ai_pinyin_debounce),
+        context_chars = cfg_int(config, "actions/ai_pinyin/context_chars",
+                                DEFAULTS.ai_pinyin_context_chars, 0, LIMITS.ai_history_chars),
+        max_chars = cfg_int(config, "actions/ai_pinyin/max_chars",
+                            DEFAULTS.ai_pinyin_max_chars, 1, LIMITS.ai_pinyin_max_chars),
+        send_candidates = cfg_int(config, "actions/ai_pinyin/send_candidates",
+            DEFAULTS.ai_pinyin_send_candidates, 0, LIMITS.ai_pinyin_send_candidates),
+        prompt = cfg_string(config, "actions/ai_pinyin/prompt", AI_PINYIN_PROMPT),
+        retry = cfg_int(config, "actions/ai_pinyin/retry_ms",
+                         DEFAULTS.ai_pinyin_retry, 0, LIMITS.ai_pinyin_retry),
+        done = {},
+        fail = {},
+        seen_sig = nil,
+        req = nil,
+        nudge_interval = env.ai_nudge_interval or DEFAULTS.ai_nudge_interval,
+        nudge_key = env.ai_nudge_key or DEFAULTS.ai_nudge_key,
+        max_wait = env.ai_max_wait_s or DEFAULTS.ai_max_wait_s,
+    }
+
+    -- 接口配置和 AI 模式共用同一组键（actions/ai/provider 与 online|local 子键）
+    if env.ai_enabled and env.ai_url then
+        st.url = env.ai_url
+        st.key = env.ai_key
+        st.model = env.ai_model
+        st.thought_off = env.ai_thought_off
+        st.max_tokens = env.ai_max_tokens
+        st.temperature = env.ai_temperature
+    else
+        local provider = cfg_string(config, "actions/ai/provider", DEFAULTS.ai_provider):lower()
+        if provider ~= "local" then provider = "online" end
+        local prefix = "actions/ai/" .. provider .. "/"
+        local default_url   = provider == "local" and DEFAULTS.ai_local_url   or DEFAULTS.ai_online_url
+        local default_model = provider == "local" and DEFAULTS.ai_local_model or DEFAULTS.ai_online_model
+        local default_key   = provider == "local" and DEFAULTS.ai_local_key   or DEFAULTS.ai_online_key
+        local default_off   = provider == "local" and DEFAULTS.ai_local_think_off
+                                                  or DEFAULTS.ai_online_think_off
+        local default_tok   = provider == "local" and DEFAULTS.ai_local_max_tokens
+                                                  or DEFAULTS.ai_online_max_tokens
+        local default_temp  = provider == "local" and DEFAULTS.ai_local_temperature
+                                                  or DEFAULTS.ai_online_temperature
+        st.url         = cfg_string(config, prefix .. "base_url", default_url)
+        st.model       = cfg_string(config, prefix .. "model", default_model)
+        st.key         = cfg_string(config, prefix .. "api_key", default_key)
+        st.thought_off = cfg_bool(config, prefix .. "thinking_disabled", default_off)
+        st.max_tokens  = cfg_int(config, prefix .. "max_tokens", default_tok, 1, LIMITS.ai_max_tokens)
+        st.temperature = cfg_number(config, prefix .. "temperature", default_temp, 0, 2)
+    end
+
+    env.ai_pinyin = st
+    local ctx = env.engine and env.engine.context
+    if ctx and ctx.set_property then
+        pcall(ctx.set_property, ctx, "ai_pinyin/marker", st.marker)
+    end
+    if log and log.info then
+        log.info(string.format(
+            "actions.lua: ai_pinyin on trigger=%s debounce_ms=%d context_chars=%d max_chars=%d model=%s",
+            spec, st.debounce, st.context_chars, st.max_chars, tostring(st.model)))
+    end
+end
+
 local function init_ai(env, config)
     local missing
     if not Actions then
@@ -1979,6 +2452,9 @@ local function init(env)
         init_ai(env, config)
     end
 
+    -- AI 拼音候选（可选）：和 AI 模式各自独立，配置项在 actions/ai_pinyin/*
+    init_ai_pinyin(env, config)
+
     env.commit_notifier = env.engine.context.commit_notifier:connect(function(ctx)
         on_commit(ctx:get_commit_text(), env)
     end)
@@ -2037,6 +2513,12 @@ local function func(key, env)
         end
     end
 
+    -- ---- AI 拼音候选（默认关闭）----
+    if env.ai_pinyin then
+        local handled = ai_pinyin_handle_key(key, env)
+        if handled ~= nil then return handled end
+    end
+
     -- ---- 方式四：AI（默认关闭；没开就完全跳过）----
     if env.ai_enabled then
         local handled = ai_handle_key(key, env)
@@ -2046,6 +2528,27 @@ local function func(key, env)
     end
 
     if key:release() then return kNoop end
+
+    -- ---- 手按退格：账本跟着少一个字 ----
+    -- 只认没有修饰键的退格；编码还在时那是删编码，不动账本。
+    -- 返回 kNoop 放行（librime 的处理器不接受 nil 作返回值），程序照常删字。
+    if key.keycode == 0xFF08
+        and not (key:ctrl() or key:alt() or key:super() or key:shift()) then
+        local ctx = env.engine and env.engine.context
+        if not (ctx and ctx:is_composing()) then
+            if (env.bs_ignore or 0) > 0 and env.bs_ignore_until
+                and os.clock() <= env.bs_ignore_until then
+                env.bs_ignore = env.bs_ignore - 1
+            else
+                env.bs_ignore = 0
+                consume_from_stack(env, 1)
+                if log and log.info then
+                    log.info("actions.lua: backspace took one char off the ledger")
+                end
+            end
+        end
+        return kNoop
+    end
 
     -- ---- 方式二：组合键（完全不碰 context）----
     -- 组合键与文本触发码可以同时启用：先看组合键，没命中再往下走文本逻辑
