@@ -15,7 +15,7 @@
 | 快捷触发码 | `z;`、`ss;`、`f;` | 替你按常用快捷键（撤销、选到行首、搜索…） |
 | AI 模式 | `ai;` 进入，打字后连按两下 `/` | 把文字发给模型，回复直接写到光标处 |
 | 剪贴板 | AI 模式下 `Ctrl+Alt+;` | 把剪贴板里的文字直接发给模型（`actions/ai/clip_key` 可改） |
-| AI 拼音候选 | `aiur;` 进入后照常打拼音 | 把拼音和已有候选交给模型，挑一个（或另造一个）排到候选第一位；选中才上屏 |
+| AI 拼音候选 | `aiur;` 进入后照常打拼音 | 把拼音和已有候选交给模型，挑一个（或另造一个）排到候选第一位；选中才上屏；挑中的就是第一位时在该候选注释上显示标记 |
 
 两个辅助开关：`"actions/history_ledger": true`（默认开，把万象快符这类绕过上屏通知的文字也补进上屏记录，否则回删会少删一个）、`"actions/debug": true`（默认 `false` 只写错误，排查时才打开）。
 
@@ -47,7 +47,7 @@
 | `actions.lua` | Rime Lua 组件（`lua_processor`）：记账、识别触发码、算出要删多少字 |
 | `actions.c` / `actions.dll` | 很小的 C 模块：真正把按键发出去（退格 / 组合键 / 打开网址 / 请求接口 / 打字） |
 | `ai_pinyin_capture.lua` | 可选滤波器（`lua_filter`）：读候选的词典拼音，写进 context 属性 |
-| `ai_pinyin_insert.lua` | 可选滤波器（`lua_filter`）：把 AI 挑出的词插到候选第一位 |
+| `ai_pinyin_insert.lua` | 可选滤波器（`lua_filter`）：把 AI 挑出的词插到候选第一位；结果与第一位相同时给第一位加标记 |
 
 > ⚠️ 它会向当前窗口**注入真实按键**，也会改动文档内容。先在记事本里试。
 
@@ -96,11 +96,11 @@ python tests\smoke_backspace.py
 ```
 
 需要 Python 3.12、MSYS2 mingw64 gcc、装好的小狼毫。脚本先现编一份 `-DACTIONS_DRY_RUN`
-的"只记账、不注入"的 dll，再跑 423 项断言（触发码、记账、退格扣账、去抖、26 项快捷键、多步、
+的"只记账、不注入"的 dll，再跑 426 项断言（触发码、记账、退格扣账、去抖、26 项快捷键、多步、
 删到符号、浏览器搜索、AI、AI 拼音候选、配置校验）。路径可用环境变量覆盖：
 `MINGW_BIN`、`WEASEL_DIR`、`RIME_DLL`、`DLLDIR`。
 
-全部通过时输出 `CHECKS: 423 asserted, ALL PASS`，进程退出码 0。
+全部通过时输出 `CHECKS: 426 asserted, ALL PASS`，进程退出码 0。
 
 ## 限制
 

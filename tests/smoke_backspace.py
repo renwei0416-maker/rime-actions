@@ -2165,7 +2165,10 @@ end
 
 -- I39. 两个滤波器的行为：捕获拼音 / 插 AI 候选
 do
-  _G.yield = function(c) _G.__cap[#_G.__cap + 1] = c.text end
+  _G.yield = function(c)
+    if #_G.__cap == 0 then _G.__first_cmt = c.comment or "" end
+    _G.__cap[#_G.__cap + 1] = c.text
+  end
   _G.Candidate = function(kind, start, stop, text, comment)
     return { kind = kind, start = start, _end = stop, text = text, comment = comment }
   end
@@ -2228,6 +2231,30 @@ do
     { text = "\u{59ae}", start = 0, _end = 2 },
   }), env)
   rec("I39_stale", table.concat(_G.__cap, ","))
+
+  -- AI 的答案就是当前第一位：不新增候选，只给第一位的注释加标记
+  props["ai_pinyin/result_sig"] = "nihc"
+  props["ai_pinyin/result"] = "\u{4f60}\u{597d}"
+  props["ai_pinyin/same"] = "1"
+  _G.__cap = {}
+  _G.__first_cmt = nil
+  insert.func(fake_input({
+    { text = "\u{4f60}\u{597d}", start = 0, _end = 4 },
+    { text = "\u{59ae}", start = 0, _end = 2 },
+  }), env)
+  rec("I39c_order", table.concat(_G.__cap, ","))
+  rec("I39c_comment", tostring(_G.__first_cmt))
+
+  -- 标记只对同一个编码有效：编码变了就退回普通候选
+  props["ai_pinyin/result_sig"] = "other"
+  _G.__cap = {}
+  _G.__first_cmt = nil
+  insert.func(fake_input({
+    { text = "\u{4f60}\u{597d}", start = 0, _end = 4 },
+    { text = "\u{59ae}", start = 0, _end = 2 },
+  }), env)
+  rec("I39c_stale_comment", tostring(_G.__first_cmt))
+  props["ai_pinyin/same"] = "0"
 
   _G.yield = nil
   _G.Candidate = nil
@@ -2800,7 +2827,7 @@ def main():
         "I38_esc_req": "false",
         "I38c_reqs": "1",
         "I38c_result": "",
-        "I38c_refreshed": "false",
+        "I38c_refreshed": "true",
         "I38c_log": "true",
         "I38b_ready": "true",
         "I38b_ret": "2",
@@ -2818,6 +2845,9 @@ def main():
         "I39_order": "\u60a8\u597d,\u4f60\u597d,\u59ae",
         "I39_first_py": "ni hao",
         "I39_stale": "\u4f60\u597d,\u59ae",
+        "I39c_order": "\u4f60\u597d,\u59ae",
+        "I39c_comment": "AI",
+        "I39c_stale_comment": "",
         "I37_hist_ready": "true",
         "I37_ret": "2,2,1",
         "I37_injected": "1",

@@ -1846,7 +1846,7 @@ local function ai_pinyin_clear(env)
 end
 
 -- 结果到达时没有按键事件，要主动重算候选才看得见
-local function ai_pinyin_publish(env, text, sig)
+local function ai_pinyin_publish(env, text, sig, same)
     local st = env.ai_pinyin
     local ctx = env.engine and env.engine.context
     if not (st and ctx) then return end
@@ -1854,6 +1854,7 @@ local function ai_pinyin_publish(env, text, sig)
         pcall(ctx.set_property, ctx, "ai_pinyin/result", text)
         pcall(ctx.set_property, ctx, "ai_pinyin/result_sig", sig)
         pcall(ctx.set_property, ctx, "ai_pinyin/marker", st.marker)
+        pcall(ctx.set_property, ctx, "ai_pinyin/same", same and "1" or "0")
     end
     if ctx.refresh_non_confirmed_composition then
         pcall(ctx.refresh_non_confirmed_composition, ctx)
@@ -1913,12 +1914,16 @@ local function ai_pinyin_accept(env, st, body)
     end
     st.done[req.sig] = content
     if req.first and content == req.first then
-        -- 模型挑的就是眼下第一位，插进去只是多一行一样的词
+        -- 模型挑的就是眼下第一位：不新增候选，只在它的注释上打个标记，
+        -- 让用户知道这次查询成功、结论一致
+        st.done[req.sig] = ""
+        st.same[req.sig] = true
         if log and log.info then
             log.info(string.format(
-                "actions.lua: ai_pinyin: %s is the first candidate already, nothing to insert",
+                "actions.lua: ai_pinyin: %s is the first candidate already, marked only",
                 content))
         end
+        ai_pinyin_publish(env, "", req.sig, true)
         return
     end
     if log and log.info then
@@ -2061,7 +2066,9 @@ local function ai_pinyin_tick(env)
             local ok, value = pcall(ctx.get_property, ctx, "ai_pinyin/result_sig")
             if ok and type(value) == "string" then shown = value end
         end
-        if shown ~= sig then ai_pinyin_publish(env, st.done[sig], sig) end
+        if shown ~= sig then
+            ai_pinyin_publish(env, st.done[sig], sig, st.same and st.same[sig])
+        end
         return
     end
     local pinyin = ""
@@ -2195,6 +2202,7 @@ local function init_ai_pinyin(env, config)
         retry = cfg_int(config, "actions/ai_pinyin/retry_ms",
                          DEFAULTS.ai_pinyin_retry, 0, LIMITS.ai_pinyin_retry),
         done = {},
+        same = {},
         fail = {},
         seen_sig = nil,
         req = nil,

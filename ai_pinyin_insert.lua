@@ -11,10 +11,11 @@
 -- super_comment_preedit 之前，只读、不改候选），写进 context 属性
 -- ai_pinyin/map，每行是「候选文字 \t 拼音音节 拼音音节」。
 --
--- 处理器写进来的三个属性：
+-- 处理器写进来的四个属性：
 --   ai_pinyin/result      要插入的 AI 词（空字符串表示这次没有）
 --   ai_pinyin/result_sig  这个结果对应的输入编码
 --   ai_pinyin/marker      插在候选注释位置的标记（可配，默认 "AI"）
+--   ai_pinyin/same        "1" 表示 AI 的答案就是当前第一位（只标记、不新增候选）
 
 local M = {}
 
@@ -80,16 +81,31 @@ function M.func(input, env)
     write_property(ctx, "ai_pinyin/first", first_text)
     write_property(ctx, "ai_pinyin/first_py", first_py)
 
-    -- 结果只对"同一个输入编码"有效，编码变了就不插
+    -- 结果只对"同一个输入编码"有效，编码变了就不插、也不标记
     local result = read_property(ctx, "ai_pinyin/result")
     local result_sig = read_property(ctx, "ai_pinyin/result_sig")
+    local same = read_property(ctx, "ai_pinyin/same")
     local sig = (ctx and ctx.input) or ""
     local marker = read_property(ctx, "ai_pinyin/marker")
 
-    if result ~= "" and result_sig == sig and first then
+    if result_sig == sig and first then
         local start = first.start or 0
         local stop = first._end or start
-        yield(Candidate("ai_pinyin", start, stop, result, marker))
+        if same == "1" then
+            -- AI 的答案就是眼下第一位：不新增候选，只给它的注释加标记，
+            -- 让用户知道"查询过了、结果一致"
+            local comment = marker
+            if first.comment and first.comment ~= "" then
+                comment = (marker ~= "" and (marker .. " " .. first.comment)) or first.comment
+            end
+            if comment == "" then comment = "-" end
+            yield(Candidate("ai_pinyin_same", start, stop, first.text, comment))
+            for i = 2, #cands do yield(cands[i]) end
+            return
+        end
+        if result ~= "" then
+            yield(Candidate("ai_pinyin", start, stop, result, marker))
+        end
     end
 
     for _, cand in ipairs(cands) do
