@@ -2043,6 +2043,7 @@ do
   rec("I38_auth", requests[1] and (requests[1].headers:find("Bearer sk%-py") and "yes" or "no") or "")
   local sys = requests[1] and (requests[1].body:match('"role":"system","content":"(.-)"') or "") or ""
   rec("I38_system_has_prompt", tostring(sys:find("拼音") ~= nil))
+  rec("I38_system_head", (sys:match("^(.-)\\n") or sys))
 
   -- 2 个字配 2 个音节 -> 挂到属性上并主动刷新候选
   req_state = "done"
@@ -2811,6 +2812,7 @@ def main():
         "I38_url": "https://example.test/v1/chat/completions",
         "I38_auth": "yes",
         "I38_system_has_prompt": "true",
+  "I38_system_head": "你是拼音输入法的补全工具。用户会给你三样东西：",
         "I38_result": "\u60a8\u597d",
         "I38_result_sig": "nihc",
         "I38_refreshed": "true",

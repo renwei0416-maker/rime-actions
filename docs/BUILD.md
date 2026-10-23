@@ -104,14 +104,14 @@
 | --- | --- | --- |
 | `actions.dll` | 93209 B | 模块本体，x64。sha256 `c2f6aeebc28408a0a902972287e848bf25b58869b437928f35c5a99b15ca16cb` |
 | `actions.c` | 61535 B | 编译用的 C 源（v10 起 = 上游 AI 版那份文件的**超集**：`press_backspace` + `press_keys` + `open_url` + 扫描码注入 + `send_events_spaced` + `http_*`/`clipboard_get`/`send_text`/`nudge`，diff 见第 2 节）。sha256 `33286399d47842ece1cc691fc57195758ac8193e180ed384195418c1fe6f9341` |
-| `actions.lua` | 105100 B | 配套 Lua **processor** 组件（`commit_notifier` 记账 + **四种触发方式可同时启用** + 26 项快捷键动作表 + `-`/`,` 多步 + 删到前一个符号 + `@search` 浏览器搜索 + 可配按键间隔 + **v10 的 AI 模式 `@ai`** + 剪贴板发送 + 上下文按问答成对带上 + 多次上屏拼到断句符 + 后台读剪贴板 + 上下文按字计数 + 可配置参数 + 被忽略时回填记录）。sha256 `175ab78ab6385d6449219f486e2545de184f49fa37b469b6613d779c47d482dc` |
+| `actions.lua` | 105203 B | 配套 Lua **processor** 组件（`commit_notifier` 记账 + **四种触发方式可同时启用** + 26 项快捷键动作表 + `-`/`,` 多步 + 删到前一个符号 + `@search` 浏览器搜索 + 可配按键间隔 + **v10 的 AI 模式 `@ai`** + 剪贴板发送 + 上下文按问答成对带上 + 多次上屏拼到断句符 + 后台读剪贴板 + 上下文按字计数 + 可配置参数 + 被忽略时回填记录）。sha256 `07c75010f0b217935f71437a399b039c1b8cc479416c441f7c604171de7e74a0` |
 | `ai_pinyin_capture.lua` | 3563 B | 只读滤波器，排在 `super_comment_preedit` 之前：把候选的词库拼音写进 context 属性 `ai_pinyin/map`（v14）。sha256 `c2d4ba44da4eaeffe44683d4aeb5b8c73e68cf61b593cf493ebd265ff2ceea75` |
 | `ai_pinyin_insert.lua` | 4470 B | 滤波器，排在 `uniquifier` 之前：把 AI 词作为第一个候选放出去；结果与第一位相同时给第一位加标记（v14）。sha256 `21aa9d778063dab2c40841081fdaa8e6eb901678a09e06b1f019a547ef69b07a` |
 | `build.cmd` | 1626 B | 一键构建（ASCII + CRLF，已加 `-lshell32` 与 `-lwinhttp`）。sha256 `da3bcf2988aed5bfe414509f3a066d8a8337021dac5b26bd4fe050b27e0cb8ef` |
 | `include\lua.h` / `luaconf.h` / `lauxlib.h` | 16282 / 22044 / 9122 B | Lua 5.4.0 头文件，ABI 基准 |
 | `lib\rime-lua.def` + `lib\librime-lua.a` | 91 / 4672 B | 备选导入库（不想直接链 rime.dll 时用） |
 
-你原始的 `上游原始 actions.c` **未改动**
+你原始的 `C:\Users\Administrator\Downloads\actions.c` **未改动**
 （1139 B，sha256 `EF885BA3A26D3DA08A7FE76071337F9FDA84BB79EE4C0A05CA16D36B018033C9`）。
 上一版 Ctrl+Z 的交付仍在 `..\ctrlz-build\`，未被覆盖。
 
@@ -379,7 +379,7 @@ PE `Time/Date` 显示 1970-01-01）。
 
 ## 6. 验证情况：做了什么、没做什么
 
-验证脚本：`tests\smoke_backspace.py`
+验证脚本：`C:\Users\Administrator\Desktop\Ai_Work\DSH_harness\smoke_backspace.py`
 
 **已做（全部离线，且未注入任何一次按键）**
 
@@ -431,9 +431,9 @@ PE `Time/Date` 显示 1970-01-01）。
    | `press_keys` 返回 2 / 0 | 分别记 `press_keys ignored (previous burst still running or too soon)` / `press_keys refused the sequence: ctrl+z` | ✅ |
    | 同一个环境里三种触发方式同时配 | `mode=text+shortcuts`（含组合键时再加 `hotkey`），`qq/` 与 `z;` 都能用 | ✅ |
 
-   **426 项断言全部 PASS**，`lua_close` 干净（v5 72 项；v6 136 项；v8 再 +38 项；v9 再 +8 项；v10 场景 I 再 +61 项 + `replace` 再 +3 项 + 发送键放行再 +9 项；
+   **427 项断言全部 PASS**，`lua_close` 干净（v5 72 项；v6 136 项；v8 再 +38 项；v9 再 +8 项；v10 场景 I 再 +61 项 + `replace` 再 +3 项 + 发送键放行再 +9 项；
    v10 的场景 I 再 +65 项；剪贴板发送 +16 项；问答配对 +9 项；多次上屏拼接 +5 项；
-   末尾标点单独上屏时 replace 仍整句删 +5 项；replace 跨多次上屏删 +4 项；少删一个字 +6 项；回车键码修正 +5 项；唤醒键码修正 +6 项；v11 再 +12 项；v12 再 +14 项，日志开关再 +5 项；v13 快符补账再 +9 项；v14 AI 拼音候选再 +30 项，失败冷却再 +2 项；模式关着时滤波器零副作用再 +3 项；Esc 不关模式再 +1 项；把候选一起发过去再 +4 项；手按退格扣账再 +5 项；等于第一候选时只标记再 +3 项）。
+   末尾标点单独上屏时 replace 仍整句删 +5 项；replace 跨多次上屏删 +4 项；少删一个字 +6 项；回车键码修正 +5 项；唤醒键码修正 +6 项；v11 再 +12 项；v12 再 +14 项，日志开关再 +5 项；v13 快符补账再 +9 项；v14 AI 拼音候选再 +30 项，失败冷却再 +2 项；模式关着时滤波器零副作用再 +3 项；Esc 不关模式再 +1 项；把候选一起发过去再 +4 项；手按退格扣账再 +5 项；等于第一候选时只标记再 +3 项；内置提示词原文比对再 +1 项）。
 
    v10 新增的场景 I（AI 模式，12 组 61 条）覆盖：总开关关着时 `ai;` 不生效（`ai=off` +
    `ai shortcut ignored`）、`send_key` 默认 `/`（码 47）与 `double_ms=1000`、只发一个请求、
@@ -564,20 +564,20 @@ PE `Time/Date` 显示 1970-01-01）。
 
 1. **先停服务**：任务栏小狼毫图标右键 → 停止服务（或结束 `WeaselServer.exe`）。
    否则 `actions.dll` 正被加载，覆盖会失败（文件占用）。
-2. 覆盖到 `<Rime 用户目录>\lua\<你的目录>\`（都放在这一层）：
+2. 覆盖到 `C:\Users\Administrator\AppData\Roaming\Rime\lua\wanxiang\ziji\`（都放在这一层）：
    - `actions.dll` ← 本目录那个（93209 B，与 v13 相同，没改）
-   - `actions.lua` ← 本目录那个（105100 B）
+   - `actions.lua` ← 本目录那个（105203 B）
    - 用 AI 拼音候选时再加 `ai_pinyin_capture.lua`（3563 B）与 `ai_pinyin_insert.lua`（4470 B）
    - 想让 26 项快捷键生效，配置里要有一行 `"actions/shortcuts": "@defaults"`
    - 想让 AI 模式生效，还要 `"actions/ai/enabled": true` + 自己的接口地址和密钥
-   > **v14 之后换的是 `actions.lua` 一个文件**（105100 B）；改了 AI 拼音候选的标记行为时还要换 `ai_pinyin_insert.lua`（4470 B）。
+   > **v14 之后换的是 `actions.lua` 一个文件**（105203 B）；改了 AI 拼音候选的标记行为时还要换 `ai_pinyin_insert.lua`（4470 B）。
    > 要开 AI 拼音候选（`actions/ai_pinyin/*`）时，还要多放那两个滤波器文件、在方案里挂两行
    > 滤波器接线（见 `使用说明.md` 第三节 7），并把 `"actions/ai_pinyin/enabled"` 设为 `true`。
    > `actions.dll` 与 `build.cmd` 都没动，不用重编。
 3. 启动服务并**重新部署**（右键 → 重新部署）。
 
 **接线必须改（v4 起）**：`actions.lua` 现在是 processor，必须挂在 `engine/processors`。
-`<Rime 用户目录>\<你的方案>.yaml` 里那行要改成**放最前**：
+`C:\Users\Administrator\AppData\Roaming\Rime\renwei_wx_zidingyi.yaml` 里那行要改成**放最前**：
 
 ```yaml
 engine/processors/@before 0: lua_processor@*wanxiang.ziji.actions.revert
