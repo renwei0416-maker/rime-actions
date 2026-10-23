@@ -104,7 +104,7 @@
 | --- | --- | --- |
 | `actions.dll` | 93209 B | 模块本体，x64。sha256 `c2f6aeebc28408a0a902972287e848bf25b58869b437928f35c5a99b15ca16cb` |
 | `actions.c` | 61535 B | 编译用的 C 源（v10 起 = 上游 AI 版那份文件的**超集**：`press_backspace` + `press_keys` + `open_url` + 扫描码注入 + `send_events_spaced` + `http_*`/`clipboard_get`/`send_text`/`nudge`，diff 见第 2 节）。sha256 `33286399d47842ece1cc691fc57195758ac8193e180ed384195418c1fe6f9341` |
-| `actions.lua` | 107737 B | 配套 Lua **processor** 组件（`commit_notifier` 记账 + **四种触发方式可同时启用** + 26 项快捷键动作表 + `-`/`,` 多步 + 删到前一个符号 + `@search` 浏览器搜索 + 可配按键间隔 + **v10 的 AI 模式 `@ai`** + 剪贴板发送 + 上下文按问答成对带上 + 多次上屏拼到断句符 + 后台读剪贴板 + 上下文按字计数 + 可配置参数 + 被忽略时回填记录）。sha256 `951b172f3f2d02d670515c2146d07d63d27b57db07a97e0440ed841b51c2f7e6` |
+| `actions.lua` | 105100 B | 配套 Lua **processor** 组件（`commit_notifier` 记账 + **四种触发方式可同时启用** + 26 项快捷键动作表 + `-`/`,` 多步 + 删到前一个符号 + `@search` 浏览器搜索 + 可配按键间隔 + **v10 的 AI 模式 `@ai`** + 剪贴板发送 + 上下文按问答成对带上 + 多次上屏拼到断句符 + 后台读剪贴板 + 上下文按字计数 + 可配置参数 + 被忽略时回填记录）。sha256 `175ab78ab6385d6449219f486e2545de184f49fa37b469b6613d779c47d482dc` |
 | `ai_pinyin_capture.lua` | 3563 B | 只读滤波器，排在 `super_comment_preedit` 之前：把候选的词库拼音写进 context 属性 `ai_pinyin/map`（v14）。sha256 `c2d4ba44da4eaeffe44683d4aeb5b8c73e68cf61b593cf493ebd265ff2ceea75` |
 | `ai_pinyin_insert.lua` | 4470 B | 滤波器，排在 `uniquifier` 之前：把 AI 词作为第一个候选放出去；结果与第一位相同时给第一位加标记（v14）。sha256 `21aa9d778063dab2c40841081fdaa8e6eb901678a09e06b1f019a547ef69b07a` |
 | `build.cmd` | 1626 B | 一键构建（ASCII + CRLF，已加 `-lshell32` 与 `-lwinhttp`）。sha256 `da3bcf2988aed5bfe414509f3a066d8a8337021dac5b26bd4fe050b27e0cb8ef` |
@@ -566,11 +566,11 @@ PE `Time/Date` 显示 1970-01-01）。
    否则 `actions.dll` 正被加载，覆盖会失败（文件占用）。
 2. 覆盖到 `<Rime 用户目录>\lua\<你的目录>\`（都放在这一层）：
    - `actions.dll` ← 本目录那个（93209 B，与 v13 相同，没改）
-   - `actions.lua` ← 本目录那个（107737 B）
+   - `actions.lua` ← 本目录那个（105100 B）
    - 用 AI 拼音候选时再加 `ai_pinyin_capture.lua`（3563 B）与 `ai_pinyin_insert.lua`（4470 B）
    - 想让 26 项快捷键生效，配置里要有一行 `"actions/shortcuts": "@defaults"`
    - 想让 AI 模式生效，还要 `"actions/ai/enabled": true` + 自己的接口地址和密钥
-   > **v14 之后换的是 `actions.lua` 一个文件**（107737 B）；改了 AI 拼音候选的标记行为时还要换 `ai_pinyin_insert.lua`（4470 B）。
+   > **v14 之后换的是 `actions.lua` 一个文件**（105100 B）；改了 AI 拼音候选的标记行为时还要换 `ai_pinyin_insert.lua`（4470 B）。
    > 要开 AI 拼音候选（`actions/ai_pinyin/*`）时，还要多放那两个滤波器文件、在方案里挂两行
    > 滤波器接线（见 `使用说明.md` 第三节 7），并把 `"actions/ai_pinyin/enabled"` 设为 `true`。
    > `actions.dll` 与 `build.cmd` 都没动，不用重编。
